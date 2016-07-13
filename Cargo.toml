@@ -1,0 +1,15 @@
+[package]
+name = "curved_gear"
+version = "0.1.0"
+authors = ["angel-manuel <angel_manuel_martin@yahoo.es>"]
+
+[dependencies]
+log = "0.3"
+env_logger = "0.3"
+sodiumoxide = "0.0.9"
+rustc-serialize = "0.3"
+bincode = "*"
+byteorder = "*"
+ascii = "*"
+# serde = "*"
+# serde_macros = "*"
