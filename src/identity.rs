@@ -20,17 +20,38 @@ impl fmt::Display for Extension {
 pub const DOMAIN_NAME_SIZE: usize = 256;
 fixed_length_box!(pub DomainName, DOMAIN_NAME_SIZE);
 
+#[derive(Clone)]
 pub struct Identity {
     pub pk: crypto_box::PublicKey,
     pub sk: crypto_box::SecretKey,
+    pub extension: Extension,
 }
 
 impl Identity {
-    pub fn new() -> Identity {
+    pub fn new(extension: Extension) -> Identity {
         let (pk, sk) = crypto_box::gen_keypair();
         Identity {
             pk: pk,
             sk: sk,
+            extension: extension,
+        }
+    }
+
+    pub fn as_client(self) -> (client_long_term::PublicKey, client_long_term::SecretKey, Extension) {
+        (client_long_term::PublicKey(self.pk), client_long_term::SecretKey(self.sk), self.extension)
+    }
+
+    pub fn as_server(self) -> (server_long_term::PublicKey, server_long_term::SecretKey, Extension) {
+        (server_long_term::PublicKey(self.pk), server_long_term::SecretKey(self.sk), self.extension)
+    }
+
+    pub fn create_remote(&self, addr: SocketAddr) -> RemoteServer {
+        let (pk, _, extension) = ((*self).clone()).as_server();
+
+        RemoteServer {
+            server_long_term_pk: pk,
+            server_addr: addr,
+            server_extension: extension,
         }
     }
 }

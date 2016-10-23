@@ -1,33 +1,50 @@
+
 extern crate curved_gear;
 extern crate env_logger;
+extern crate mioco;
 
-use std::net::UdpSocket;
+use std::io;
+use std::net::SocketAddr;
 
 use curved_gear::*;
+use mioco::udp::UdpSocket;
 
 fn main() {
     env_logger::init().unwrap();
 
-    let client_id = Identity::new();
-    let client_ext = Extension::from_barr(b"client");
-    let server_id = Identity::new();
-    let server_ext = Extension::from_barr(b"server");
-    let server_desc = RemoteServer {
-        server_long_term_pk: server_long_term::PublicKey(server_id.pk.clone()),
-        server_addr: "127.0.0.1:8888".parse().unwrap(),
-        server_extension: server_ext.clone(),
-    };
-    let udp_7777 = UdpSocket::bind("127.0.0.1:7777").unwrap();
-    let udp_8888 = UdpSocket::bind("127.0.0.1:8888").unwrap();
-    let server = Server::new(server_id, server_ext, udp_8888);
-    let mut client = Client::connect(client_id, client_ext, udp_7777, server_desc, Some("hello".as_bytes())).unwrap();
+    let client_id = Identity::new(Extension::from_barr(b"client"));
+    let server_id = Identity::new(Extension::from_barr(b"server"));
+    let server_addr: SocketAddr = "0.0.0.0:7777".parse().unwrap();
+    let remote_addr: SocketAddr = "127.0.0.1:7777".parse().unwrap();
 
-    let mut accepted_conn = server.accept();
+    mioco::start(|| -> io::Result<()> {
+        let listener = CCPListener::new(server_id.clone(), UdpSocket::bound(&server_addr).unwrap());
 
-    client.send("aaa".as_bytes()).unwrap();
+        mioco::spawn(|| -> io::Result<()> {
+            let mut conn = CCPStream::connect(client_id, server_id.create_remote(remote_addr));
+            let mut buf = [0u8; 1024];
 
-    println!("{}", String::from_utf8(accepted_conn.recv()).unwrap());
-    println!("{}", String::from_utf8(accepted_conn.recv()).unwrap());
-    accepted_conn.send("bbb".as_bytes()).unwrap();
-    println!("{}", String::from_utf8(client.recv().unwrap()).unwrap());
+            try!(conn.write_all("Hello world".as_bytes()));
+            let read_len = try!(conn.read(&mut buf));
+            println!("{}", String::from_utf8_lossy(&buf[0..read_len]));
+
+            Ok(())
+        });
+
+        loop {
+            let mut conn = try!(listener.accept());
+
+            mioco::spawn(move || -> io::Result<()> {
+                let mut buf = [0u8; 1024];
+
+                loop {
+                    let read_len = try!(conn.read(&mut buf));
+                    if read_len == 0 { break; }
+                    try!(conn.write_all(&buf[..read_len]));
+                }
+
+                Ok(())
+            });
+        }
+    }).unwrap();
 }

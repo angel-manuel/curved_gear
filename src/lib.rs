@@ -5,25 +5,23 @@ extern crate rustc_serialize;
 extern crate bincode;
 extern crate byteorder;
 extern crate ascii;
-
 #[macro_use]
 extern crate log;
+extern crate mioco;
 
 pub type Result<T> = result::Result<T, ()>;
 
 #[macro_use]
-pub mod keys;
-
-#[macro_use]
 pub mod boxes;
-
-pub mod packet;
+#[macro_use]
+pub mod keys;
 pub mod identity;
-pub mod client;
-pub mod server;
 pub mod nonces;
+pub mod packet;
+
+pub mod logic;
+pub mod ccp;
 
 pub use identity::{Identity, Extension, RemoteServer};
 pub use keys::*;
-pub use server::{Server, ServerSocket};
-pub use client::Client;
+pub use ccp::{Stream as CCPStream, Listener as CCPListener};

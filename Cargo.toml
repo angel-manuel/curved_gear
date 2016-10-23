@@ -1,6 +1,6 @@
 [package]
 name = "curved_gear"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["angel-manuel <angel_manuel_martin@yahoo.es>"]
 description = "Implementation of CurveCP"
 license = "MIT"
@@ -8,10 +8,12 @@ repository = "https://github.com/angel-manuel/curved_gear"
 
 [dependencies]
 log = "0.3"
-env_logger = "0.3"
 sodiumoxide = "0.0.9"
 rustc-serialize = "0.3"
 bincode = "0.5"
 byteorder = "0.5"
 ascii = "0.7"
-nettraits = "0.x"
+mioco = "0.8"
+
+[dev-dependencies]
+env_logger = "0.3"
