@@ -4,11 +4,15 @@ use std::rc::{Rc, Weak};
 use std::cell::RefCell;
 
 use mioco::udp::UdpSocket;
-use bincode::{rustc_serialize as bcode_rcs};
+use bincode::rustc_serialize as bcode_rcs;
+use sodiumoxide::crypto::secretbox as crypto_secretbox;
 
 use ::Result;
 use identity::{Identity, RemoteServer, Extension};
-use packet::{Packet, PACKET_MAX_SIZE};
+use packet::*;
+use keys::*;
+use boxes::*;
+use nonces::*;
 
 pub struct Stream {
 
@@ -54,20 +58,32 @@ impl Demultiplexor {
                     listener_weak.upgrade()
                 )
             } {
-                try!(listener.borrow_mut().process(packet, rem_addr));
+                try!(listener.borrow_mut().process(packet, &mut self.sock, rem_addr));
             }
         }
     }
 }
 
 pub struct Listener {
-    my_id: Identity,
+    my_extension: Extension,
+    my_long_term_pk: server_long_term::PublicKey,
+    my_long_term_sk: server_long_term::SecretKey,
+    minute_key: crypto_secretbox::Key,
+    last_minute_key: crypto_secretbox::Key,
+    streams: HashMap<(Extension, client_short_term::PublicKey), Weak<RefCell<Stream>>>,
 }
 
 impl Listener {
-    pub fn new(my_id: Identity) -> Listener {
+    fn new(my_id: Identity) -> Listener {
+        let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_server();
+
         Listener {
-            my_id: my_id,
+            my_extension: my_extension,
+            my_long_term_pk: my_long_term_pk,
+            my_long_term_sk: my_long_term_sk,
+            minute_key: crypto_secretbox::gen_key(),
+            last_minute_key: crypto_secretbox::gen_key(),
+            streams: HashMap::new(),
         }
     }
 
@@ -75,7 +91,56 @@ impl Listener {
         Ok(Stream::new())
     }
 
-    pub fn process(&mut self, packet: Packet, rem_addr: SocketAddr) -> Result<()> {
+    pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+        match packet {
+            Packet::ClientMessage(client_msg_packet) => {
+                if let Some(stream) = {
+                    let conn_key = (client_msg_packet.client_extension.clone(), client_msg_packet.client_short_term_pk.clone());
+                    self.streams.get_mut(&conn_key)
+                } {
+
+                }
+            },
+            Packet::Initiate(initiate_packet) => {
+            },
+            Packet::Hello(hello_packet) => {
+                try!(self.process_hello(hello_packet, sock, rem_addr));
+            },
+            _ => {
+                debug!("Unvalid packet type");
+            }
+        }
+
+
+        Ok(())
+    }
+
+    fn process_hello(&self, hello_packet: HelloPacket, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+        let client_short_term_pk = hello_packet.client_short_term_pk;
+        let conn_key = (hello_packet.client_extension.clone(), client_short_term_pk.clone());
+
+        if self.streams.contains_key(&conn_key) {
+            debug!("Hello packet received on open connection");
+        } else {
+            hello_packet.hello_box.open(&client_short_term_pk, &self.my_long_term_sk).unwrap();
+
+            let (server_short_term_pk, server_short_term_sk) = server_short_term::gen_keypair();
+
+            let cookie_packet: Packet = CookiePacket {
+                client_extension: hello_packet.client_extension.clone(),
+                server_extension: self.my_extension.clone(),
+                cookie_box: PlainCookieBox {
+                    server_short_term_pk: server_short_term_pk,
+                    server_cookie: PlainCookie {
+                        client_short_term_pk: client_short_term_pk.clone(),
+                        server_short_term_sk: server_short_term_sk.clone(),
+                    }.seal(&CookieNonce::new_random(), &self.minute_key),
+                }.seal(&Nonce16::new_random(), &client_short_term_pk, &self.my_long_term_sk),
+            }.into();
+
+            try!(cookie_packet.send(sock, &rem_addr));
+        }
+
         Ok(())
     }
 }

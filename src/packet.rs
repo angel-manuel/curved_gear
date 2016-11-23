@@ -1,10 +1,11 @@
 use std::io::Cursor;
-use std::net::{UdpSocket, SocketAddr};
+use std::net::{SocketAddr};
 use std::convert::{From, Into};
 use std::result::Result as RResult;
 use std::io::Result as IOResult;
 use std::hash::{Hash, Hasher};
 
+use mioco::udp::UdpSocket;
 use rustc_serialize::{Encodable, Encoder, Decodable, Decoder};
 use sodiumoxide::crypto::box_ as crypto_box;
 use bincode::rustc_serialize as bcode;
@@ -251,15 +252,15 @@ impl Packet {
         }
     }
 
-    pub fn recv(sock: &UdpSocket) -> IOResult<(Packet, SocketAddr)> {
+    pub fn recv(sock: &mut UdpSocket) -> IOResult<(Packet, SocketAddr)> {
         let mut buf = [0u8; PACKET_MAX_SIZE];
 
-        let (recv_len, rem_addr) = try!(sock.recv_from(&mut buf));
+        let (recv_len, rem_addr) = try!(sock.recv(&mut buf));
 
         Ok(bcode::decode(&buf[..recv_len]).map(|packet| (packet, rem_addr)).unwrap())
     }
 
-    pub fn send(&self, sock: &UdpSocket, addr: SocketAddr) -> IOResult<usize> {
+    pub fn send(&self, sock: &mut UdpSocket, addr: &SocketAddr) -> IOResult<usize> {
         let mut buf = [0u8; PACKET_MAX_SIZE];
         let written = {
             let mut buf_cur = Cursor::new(buf.as_mut());
@@ -269,6 +270,6 @@ impl Packet {
             buf_cur.position() as usize
         };
 
-        sock.send_to(&buf[..written], addr)
+        sock.send(&buf[..written], addr)
     }
 }
