@@ -9,7 +9,9 @@ extern crate ascii;
 extern crate log;
 extern crate mioco;
 
-pub type Result<T> = result::Result<T, ()>;
+pub mod error;
+
+pub type Result<T> = result::Result<T, error::Error>;
 
 #[macro_use]
 pub mod boxes;
@@ -19,7 +21,6 @@ pub mod identity;
 pub mod nonces;
 pub mod packet;
 
-pub mod logic;
 pub mod ccp;
 
 pub use identity::{Identity, Extension, RemoteServer};

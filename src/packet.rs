@@ -231,6 +231,26 @@ impl Decodable for Packet {
 }
 
 impl Packet {
+    pub fn get_destination_extension(&self) -> &Extension {
+        match *self {
+            Packet::ClientMessage(ref packet) => {
+                &packet.server_extension
+            },
+            Packet::ServerMessage(ref packet) => {
+                &packet.client_extension
+            },
+            Packet::Cookie(ref packet) => {
+                &packet.client_extension
+            },
+            Packet::Initiate(ref packet) => {
+                &packet.server_extension
+            },
+            Packet::Hello(ref packet) => {
+                &packet.server_extension
+            },
+        }
+    }
+
     pub fn recv(sock: &UdpSocket) -> IOResult<(Packet, SocketAddr)> {
         let mut buf = [0u8; PACKET_MAX_SIZE];
 
