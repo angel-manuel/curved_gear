@@ -75,6 +75,12 @@ pub struct ServerSocket {
     next_send_nonce: Nonce8,
 }
 
+impl ServerSocket {
+    pub fn recv(&mut self) -> Result<Vec<u8>> {
+        self.recv_rx.recv().or(Err("Coudlnt read from recv channel".into()))
+    }
+}
+
 pub struct Listener {
     my_extension: Extension,
     my_long_term_pk: server_long_term::PublicKey,
