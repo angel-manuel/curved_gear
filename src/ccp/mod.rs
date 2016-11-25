@@ -94,7 +94,7 @@ impl ClientSock {
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
-        self.recv_rx.recv().or(Err("Coudlnt read from recv channel".into()))
+        self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()))
     }
 
     fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
@@ -131,7 +131,7 @@ pub struct ServerSocket {
 
 impl ServerSocket {
     pub fn recv(&mut self) -> Result<Vec<u8>> {
-        self.recv_rx.recv().or(Err("Coudlnt read from recv channel".into()))
+        self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()))
     }
 
     pub fn send(&mut self, msg: &[u8]) -> Result<usize> {
