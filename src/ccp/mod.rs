@@ -79,15 +79,22 @@ impl Demultiplexor {
 }
 
 pub struct ClientSock {
-    // recv_rx: Receiver<Vec<u8>>,
-    // recv_tx: Sender<Vec<u8>>,
+    recv_rx: Receiver<Vec<u8>>,
+    recv_tx: Sender<Vec<u8>>,
 }
 
 impl ClientSock {
     pub fn new(my_id: Identity, remote_id: RemoteServer) -> ClientSock {
-        // let (recv_rx, recv_tx) = channel();
+        let (recv_tx, recv_rx) = channel();
 
-        ClientSock {}
+        ClientSock {
+            recv_rx: recv_rx,
+            recv_tx: recv_tx,
+        }
+    }
+
+    pub fn recv(&mut self) -> Result<Vec<u8>> {
+        self.recv_rx.recv().or(Err("Coudlnt read from recv channel".into()))
     }
 
     fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
