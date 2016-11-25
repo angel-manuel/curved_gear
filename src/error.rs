@@ -1,18 +1,32 @@
 use std::io;
 use std::string::String;
 use std::convert::From;
+use std::borrow::Cow;
 
 use bincode::rustc_serialize as bcode_rcs;
 
+#[derive(Debug)]
 pub enum Error {
-    CCP(String),
+    CCP(Cow<'static, str>),
     IO(io::Error),
     DecodingError(bcode_rcs::DecodingError),
 }
 
+impl From<Cow<'static, str>> for Error {
+    fn from(desc: Cow<'static, str>) -> Error {
+        Error::CCP(desc)
+    }
+}
+
 impl From<String> for Error {
     fn from(desc: String) -> Error {
-        Error::CCP(desc)
+        Cow::Owned::<'static, str>(desc).into()
+    }
+}
+
+impl From<&'static str> for Error {
+    fn from(desc: &'static str) -> Error {
+        Cow::Borrowed(desc).into()
     }
 }
 
