@@ -9,7 +9,7 @@ use bincode::rustc_serialize as bcode_rcs;
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
 
 use ::Result;
-use identity::{Identity, RemoteServer, Extension};
+use identity::{Identity, Extension};
 use packet::*;
 use keys::*;
 use boxes::*;
@@ -101,7 +101,6 @@ impl ServerSocket {
 
 pub struct Listener {
     my_extension: Extension,
-    my_long_term_pk: server_long_term::PublicKey,
     my_long_term_sk: server_long_term::SecretKey,
     minute_key: crypto_secretbox::Key,
     last_minute_key: crypto_secretbox::Key,
@@ -112,12 +111,11 @@ pub struct Listener {
 
 impl Listener {
     fn new(my_id: Identity) -> Listener {
-        let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_server();
+        let (_, my_long_term_sk, my_extension) = my_id.as_server();
         let (accept_chan_tx, accept_chan_rx) = channel();
 
         Listener {
             my_extension: my_extension,
-            my_long_term_pk: my_long_term_pk,
             my_long_term_sk: my_long_term_sk,
             minute_key: crypto_secretbox::gen_key(),
             last_minute_key: crypto_secretbox::gen_key(),
