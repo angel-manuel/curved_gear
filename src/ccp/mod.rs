@@ -51,14 +51,14 @@ impl Demultiplexor {
         listener
     }
 
-    // pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Rc<RefCell<ClientSock>> {
-    //     let client_extension = client_id.extension.clone();
-    //     let client = Rc::new(RefCell::new(ClientSock::new(client_id, remote_id)));
-    //
-    //     self.clients.insert(client_extension, Rc::downgrade(&client));
-    //
-    //     client
-    // }
+    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Rc<RefCell<ClientSock>> {
+        let client_extension = client_id.extension.clone();
+        let client = Rc::new(RefCell::new(ClientSock::new(client_id, remote_id)));
+
+        self.packet_processors.insert(client_extension, Rc::downgrade(&client) as Weak<RefCell<PacketProcessor>>);
+
+        client
+    }
 
     pub fn listen(&mut self) -> Result<()> {
         let mut buf = [0u8; PACKET_MAX_SIZE];
@@ -90,7 +90,13 @@ impl ClientSock {
         ClientSock {}
     }
 
-    pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+    fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
+        Err("Not implemented".into())
+    }
+}
+
+impl PacketProcessor for ClientSock {
+    fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
         match packet {
             Packet::ServerMessage(server_msg_packet) => {
                 try!(self.process_server_msg(server_msg_packet));
@@ -103,10 +109,6 @@ impl ClientSock {
         }
 
         Ok(())
-    }
-
-    fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
-        Err("Not implemented".into())
     }
 }
 
