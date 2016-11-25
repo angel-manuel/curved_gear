@@ -9,7 +9,7 @@ use bincode::rustc_serialize as bcode_rcs;
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
 
 use ::Result;
-use identity::{Identity, Extension};
+use identity::{Identity, Extension, RemoteServer};
 use packet::*;
 use keys::*;
 use boxes::*;
@@ -28,6 +28,7 @@ impl Stream {
 pub struct Demultiplexor {
     sock: UdpSocket,
     listeners: HashMap<Extension, Weak<RefCell<Listener>>>,
+    clients: HashMap<Extension, Weak<RefCell<ClientSock>>>,
 }
 
 impl Demultiplexor {
@@ -35,6 +36,7 @@ impl Demultiplexor {
         Demultiplexor {
             sock: sock,
             listeners: HashMap::new(),
+            clients: HashMap::new(),
         }
     }
 
@@ -45,6 +47,15 @@ impl Demultiplexor {
         self.listeners.insert(listener_extension, Rc::downgrade(&listener));
 
         listener
+    }
+
+    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Rc<RefCell<ClientSock>> {
+        let client_extension = client_id.extension.clone();
+        let client = Rc::new(RefCell::new(ClientSock::new(client_id, remote_id)));
+
+        self.clients.insert(client_extension, Rc::downgrade(&client));
+
+        client
     }
 
     pub fn listen(&mut self) -> Result<()> {
@@ -60,8 +71,29 @@ impl Demultiplexor {
                 )
             } {
                 try!(listener.borrow_mut().process(packet, &mut self.sock, rem_addr));
+            } else if let Some(ref mut client) = {
+                let dst_extension = packet.get_destination_extension();
+                self.clients.get_mut(dst_extension).and_then(|client_weak|
+                    client_weak.upgrade()
+                )
+            } {
+                try!(client.borrow_mut().process(packet, &mut self.sock, rem_addr));
             }
         }
+    }
+}
+
+pub struct ClientSock {
+
+}
+
+impl ClientSock {
+    pub fn new(my_id: Identity, remote_id: RemoteServer) -> ClientSock {
+        ClientSock {}
+    }
+
+    pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+        Ok(())
     }
 }
 
