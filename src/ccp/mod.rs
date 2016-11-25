@@ -4,6 +4,7 @@ use std::rc::{Rc, Weak};
 use std::cell::RefCell;
 
 use mioco::udp::UdpSocket;
+use mioco::sync::mpsc::{channel, Receiver, Sender};
 use bincode::rustc_serialize as bcode_rcs;
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
 
@@ -70,7 +71,7 @@ pub struct Listener {
     my_long_term_sk: server_long_term::SecretKey,
     minute_key: crypto_secretbox::Key,
     last_minute_key: crypto_secretbox::Key,
-    streams: HashMap<(Extension, client_short_term::PublicKey), Weak<RefCell<Stream>>>,
+    streams: HashMap<(Extension, client_short_term::PublicKey), Sender<()>>,
 }
 
 impl Listener {
@@ -94,11 +95,17 @@ impl Listener {
     pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
         match packet {
             Packet::ClientMessage(client_msg_packet) => {
-                if let Some(stream) = {
-                    let conn_key = (client_msg_packet.client_extension.clone(), client_msg_packet.client_short_term_pk.clone());
-                    self.streams.get_mut(&conn_key)
-                } {
+                let mut preserve = true;
+                let conn_key = (client_msg_packet.client_extension.clone(),
+                                client_msg_packet.client_short_term_pk.clone());
 
+                if let Some(stream_ch) = self.streams.get_mut(&conn_key) {
+                    let send_res = stream_ch.send(());
+                    preserve = send_res.is_ok();
+                }
+
+                if !preserve {
+                    self.streams.remove(&conn_key);
                 }
             },
             Packet::Initiate(initiate_packet) => {
