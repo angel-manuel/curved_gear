@@ -25,18 +25,20 @@ impl Stream {
     }
 }
 
+trait PacketProcessor {
+    fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()>;
+}
+
 pub struct Demultiplexor {
     sock: UdpSocket,
-    listeners: HashMap<Extension, Weak<RefCell<Listener>>>,
-    clients: HashMap<Extension, Weak<RefCell<ClientSock>>>,
+    packet_processors: HashMap<Extension, Weak<RefCell<PacketProcessor>>>,
 }
 
 impl Demultiplexor {
     pub fn new(sock: UdpSocket) -> Demultiplexor {
         Demultiplexor {
             sock: sock,
-            listeners: HashMap::new(),
-            clients: HashMap::new(),
+            packet_processors: HashMap::new(),
         }
     }
 
@@ -44,19 +46,19 @@ impl Demultiplexor {
         let listener_extension = listener_id.extension.clone();
         let listener = Rc::new(RefCell::new(Listener::new(listener_id)));
 
-        self.listeners.insert(listener_extension, Rc::downgrade(&listener));
+        self.packet_processors.insert(listener_extension, Rc::downgrade(&listener) as Weak<RefCell<PacketProcessor>>);
 
         listener
     }
 
-    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Rc<RefCell<ClientSock>> {
-        let client_extension = client_id.extension.clone();
-        let client = Rc::new(RefCell::new(ClientSock::new(client_id, remote_id)));
-
-        self.clients.insert(client_extension, Rc::downgrade(&client));
-
-        client
-    }
+    // pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Rc<RefCell<ClientSock>> {
+    //     let client_extension = client_id.extension.clone();
+    //     let client = Rc::new(RefCell::new(ClientSock::new(client_id, remote_id)));
+    //
+    //     self.clients.insert(client_extension, Rc::downgrade(&client));
+    //
+    //     client
+    // }
 
     pub fn listen(&mut self) -> Result<()> {
         let mut buf = [0u8; PACKET_MAX_SIZE];
@@ -64,36 +66,47 @@ impl Demultiplexor {
             let (recv_len, rem_addr) = try!(self.sock.recv(&mut buf));
             let packet: Packet = try!(bcode_rcs::decode(&buf[..recv_len]));
 
-            if let Some(ref mut listener) = {
+            if let Some(ref mut packet_processor) = {
                 let dst_extension = packet.get_destination_extension();
-                self.listeners.get_mut(dst_extension).and_then(|listener_weak|
-                    listener_weak.upgrade()
+                self.packet_processors.get_mut(dst_extension).and_then(|packet_processor_weak|
+                    packet_processor_weak.upgrade()
                 )
             } {
-                try!(listener.borrow_mut().process(packet, &mut self.sock, rem_addr));
-            } else if let Some(ref mut client) = {
-                let dst_extension = packet.get_destination_extension();
-                self.clients.get_mut(dst_extension).and_then(|client_weak|
-                    client_weak.upgrade()
-                )
-            } {
-                try!(client.borrow_mut().process(packet, &mut self.sock, rem_addr));
+                try!(packet_processor.borrow_mut().process_packet(packet, &mut self.sock, rem_addr));
             }
         }
     }
 }
 
 pub struct ClientSock {
-
+    // recv_rx: Receiver<Vec<u8>>,
+    // recv_tx: Sender<Vec<u8>>,
 }
 
 impl ClientSock {
     pub fn new(my_id: Identity, remote_id: RemoteServer) -> ClientSock {
+        // let (recv_rx, recv_tx) = channel();
+
         ClientSock {}
     }
 
     pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+        match packet {
+            Packet::ServerMessage(server_msg_packet) => {
+                try!(self.process_server_msg(server_msg_packet));
+            },
+            Packet::Cookie(cookie_packet) => {
+            },
+            _ => {
+                debug!("Unvalid packet type");
+            }
+        }
+
         Ok(())
+    }
+
+    fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
+        Err("Not implemented".into())
     }
 }
 
@@ -137,14 +150,14 @@ pub struct Listener {
     minute_key: crypto_secretbox::Key,
     last_minute_key: crypto_secretbox::Key,
     conns: HashMap<(Extension, client_short_term::PublicKey), ServerConnection>,
-    accept_chan_tx: Sender<ServerSocket>,
-    accept_chan_rx: Receiver<ServerSocket>,
+    accept_tx: Sender<ServerSocket>,
+    accept_rx: Receiver<ServerSocket>,
 }
 
 impl Listener {
     fn new(my_id: Identity) -> Listener {
         let (_, my_long_term_sk, my_extension) = my_id.as_server();
-        let (accept_chan_tx, accept_chan_rx) = channel();
+        let (accept_tx, accept_rx) = channel();
 
         Listener {
             my_extension: my_extension,
@@ -152,33 +165,13 @@ impl Listener {
             minute_key: crypto_secretbox::gen_key(),
             last_minute_key: crypto_secretbox::gen_key(),
             conns: HashMap::new(),
-            accept_chan_tx: accept_chan_tx,
-            accept_chan_rx: accept_chan_rx,
+            accept_tx: accept_tx,
+            accept_rx: accept_rx,
         }
     }
 
     pub fn accept(&mut self) -> Result<ServerSocket> {
-        self.accept_chan_rx.recv().or(Err("Couldnt read accept channel".into()))
-    }
-
-    pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
-        match packet {
-            Packet::ClientMessage(client_msg_packet) => {
-                try!(self.process_client_msg(client_msg_packet, sock, rem_addr));
-            },
-            Packet::Initiate(initiate_packet) => {
-                try!(self.process_initiate(initiate_packet, sock, rem_addr));
-            },
-            Packet::Hello(hello_packet) => {
-                try!(self.process_hello(hello_packet, sock, rem_addr));
-            },
-            _ => {
-                debug!("Unvalid packet type");
-            }
-        }
-
-
-        Ok(())
+        self.accept_rx.recv().or(Err("Couldnt read accept channel".into()))
     }
 
     fn process_hello(&self, hello_packet: HelloPacket, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
@@ -257,7 +250,7 @@ impl Listener {
             next_send_nonce: Nonce8::new_low(),
         };
 
-        self.accept_chan_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
+        self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
     }
 
     fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, _sock: &mut UdpSocket, _rem_addr: SocketAddr) -> Result<()> {
@@ -266,6 +259,27 @@ impl Listener {
 
         if let Some(server_conn) = self.conns.get_mut(&conn_key) {
             try!(server_conn.process_packet(client_msg_packet));
+        }
+
+        Ok(())
+    }
+}
+
+impl PacketProcessor for Listener {
+    fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+        match packet {
+            Packet::ClientMessage(client_msg_packet) => {
+                try!(self.process_client_msg(client_msg_packet, sock, rem_addr));
+            },
+            Packet::Initiate(initiate_packet) => {
+                try!(self.process_initiate(initiate_packet, sock, rem_addr));
+            },
+            Packet::Hello(hello_packet) => {
+                try!(self.process_hello(hello_packet, sock, rem_addr));
+            },
+            _ => {
+                debug!("Unvalid packet type");
+            }
         }
 
         Ok(())
