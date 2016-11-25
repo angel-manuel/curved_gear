@@ -75,12 +75,6 @@ pub struct ServerSocket {
     next_send_nonce: Nonce8,
 }
 
-struct ServerConnection {
-    precomputed_key: PrecomputedKey,
-    recv_tx: Sender<Vec<u8>>,
-    last_recv_nonce: Nonce8,
-}
-
 pub struct Listener {
     my_extension: Extension,
     my_long_term_pk: server_long_term::PublicKey,
@@ -116,18 +110,7 @@ impl Listener {
     pub fn process(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
         match packet {
             Packet::ClientMessage(client_msg_packet) => {
-                let mut preserve = true;
-                let conn_key = (client_msg_packet.client_extension.clone(),
-                                client_msg_packet.client_short_term_pk.clone());
-
-                if let Some(server_conn) = self.conns.get_mut(&conn_key) {
-                    let send_res = server_conn.recv_tx.send(vec![]);
-                    preserve = send_res.is_ok();
-                }
-
-                if !preserve {
-                    self.conns.remove(&conn_key);
-                }
+                try!(self.process_client_msg(client_msg_packet, sock, rem_addr));
             },
             Packet::Initiate(initiate_packet) => {
                 try!(self.process_initiate(initiate_packet, sock, rem_addr));
@@ -221,5 +204,39 @@ impl Listener {
         };
 
         self.accept_chan_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
+    }
+
+    fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, _sock: &mut UdpSocket, _rem_addr: SocketAddr) -> Result<()> {
+        let conn_key = (client_msg_packet.client_extension.clone(),
+                        client_msg_packet.client_short_term_pk.clone());
+
+        if let Some(server_conn) = self.conns.get_mut(&conn_key) {
+            try!(server_conn.process_packet(client_msg_packet));
+        }
+
+        Ok(())
+    }
+}
+
+struct ServerConnection {
+    precomputed_key: PrecomputedKey,
+    recv_tx: Sender<Vec<u8>>,
+    last_recv_nonce: Nonce8,
+}
+
+impl ServerConnection {
+    pub fn process_packet(&mut self, client_msg_packet: ClientMessagePacket) -> Result<()> {
+        if client_msg_packet.payload_box.nonce <= self.last_recv_nonce {
+            return Err("Bad nonce".into()); // TODO: Rework to allow some packet reordering
+        }
+
+        let msg = try!(client_msg_packet.payload_box.open_precomputed(&self.precomputed_key)
+            .or(Err("Bad encrypted message")));
+
+        self.last_recv_nonce = client_msg_packet.payload_box.nonce;
+
+        try!(self.recv_tx.send(msg).or(Err("Couldnt write to recv channel")));
+
+        Ok(())
     }
 }
