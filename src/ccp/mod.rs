@@ -9,7 +9,7 @@ use bincode::rustc_serialize as bcode_rcs;
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
 
 use ::Result;
-use identity::{Identity, Extension, RemoteServer};
+use identity::{Identity, Extension, RemoteServer, DomainName};
 use packet::*;
 use keys::*;
 use boxes::*;
@@ -51,13 +51,13 @@ impl Demultiplexor {
         listener
     }
 
-    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Rc<RefCell<ClientSock>> {
+    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Result<Rc<RefCell<ClientSock>>> {
         let client_extension = client_id.extension.clone();
-        let client = Rc::new(RefCell::new(ClientSock::new(client_id, remote_id)));
+        let client = Rc::new(RefCell::new(try!(ClientSock::connect(&mut self.sock, client_id, remote_id))));
 
         self.packet_processors.insert(client_extension, Rc::downgrade(&client) as Weak<RefCell<PacketProcessor>>);
 
-        client
+        Ok(client)
     }
 
     pub fn listen(&mut self) -> Result<()> {
@@ -81,20 +81,85 @@ impl Demultiplexor {
 pub struct ClientSock {
     recv_rx: Receiver<Vec<u8>>,
     recv_tx: Sender<Vec<u8>>,
+    my_long_term_pk: client_long_term::PublicKey,
+    my_long_term_sk: client_long_term::SecretKey,
+    my_extension: Extension,
+    my_short_term_pk: client_short_term::PublicKey,
+    my_short_term_sk: client_short_term::SecretKey,
+    precomputed_key: Option<PrecomputedKey>,
+    server_extension: Extension,
+    server_long_term_pk: server_long_term::PublicKey,
+    server_addr: SocketAddr,
+    next_send_nonce: Nonce8,
 }
 
 impl ClientSock {
-    pub fn new(my_id: Identity, remote_id: RemoteServer) -> ClientSock {
+    pub fn connect(sock: &mut UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSock> {
         let (recv_tx, recv_rx) = channel();
+        let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_client();
+        let (my_short_term_pk, my_short_term_sk) = client_short_term::gen_keypair();
+        let mut next_send_nonce = Nonce8::new_low();
+        let RemoteServer { server_extension, server_long_term_pk, server_addr } = remote_id;
 
-        ClientSock {
+        let hello_packet: Packet = HelloPacket {
+            server_extension: server_extension.clone(),
+            client_extension: my_extension.clone(),
+            client_short_term_pk: my_short_term_pk.clone(),
+            hello_box: PlainHelloBox::new_empty().seal(&next_send_nonce, &server_long_term_pk, &my_short_term_sk),
+        }.into();
+        next_send_nonce.increment();
+
+        try!(hello_packet.send(sock, &server_addr));
+
+        // TODO: recv from demultiplexor somehow. Maybe split ClientSockSeed and proper ClientSock
+        // Maybe a PacketProcessor closure. What about non-demultiplexed ones?
+
+        Ok(ClientSock {
             recv_rx: recv_rx,
             recv_tx: recv_tx,
-        }
+            my_long_term_pk: my_long_term_pk,
+            my_long_term_sk: my_long_term_sk,
+            my_extension: my_extension,
+            my_short_term_pk: my_short_term_pk,
+            my_short_term_sk: my_short_term_sk,
+            precomputed_key: None,
+            server_extension: server_extension,
+            server_long_term_pk: server_long_term_pk,
+            server_addr: server_addr,
+            next_send_nonce: next_send_nonce,
+        })
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()))
+    }
+
+    fn process_cookie_packet(&mut self, cookie_packet: CookiePacket, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+        let cookie_box = cookie_packet.cookie_box.open(&self.server_long_term_pk, &self.my_short_term_sk).unwrap();
+        let server_short_term_pk = cookie_box.server_short_term_pk;
+        let precomputed_key = PrecomputedKey::precompute_at_client(&server_short_term_pk, &self.my_short_term_sk);
+
+        let initiate_packet: Packet = InitiatePacket {
+            server_extension: self.server_extension.clone(),
+            client_extension: self.my_extension.clone(),
+            client_short_term_pk: self.my_short_term_pk.clone(),
+            server_cookie: cookie_box.server_cookie,
+            initiate_box: PlainInitiateBox {
+                client_long_term_pk: self.my_long_term_pk.clone(),
+                vouch: PlainVouch {
+                    client_short_term_pk: self.my_short_term_pk.clone(),
+                }.seal(&Nonce16::new_random(), &self.server_long_term_pk, &self.my_long_term_sk),
+                domain_name: DomainName::new_empty(),
+            }.seal_precomputed(&self.next_send_nonce, &precomputed_key, None),
+        }.into();
+        self.next_send_nonce.increment();
+
+        try!(initiate_packet.send(sock, &rem_addr));
+
+        self.precomputed_key = Some(precomputed_key);
+        self.server_addr = rem_addr;
+
+        Ok(())
     }
 
     fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
@@ -109,6 +174,7 @@ impl PacketProcessor for ClientSock {
                 try!(self.process_server_msg(server_msg_packet));
             },
             Packet::Cookie(cookie_packet) => {
+                try!(self.process_cookie_packet(cookie_packet, sock, rem_addr));
             },
             _ => {
                 debug!("Unvalid packet type");
