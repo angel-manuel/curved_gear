@@ -91,6 +91,7 @@ pub struct ClientSock {
     server_long_term_pk: server_long_term::PublicKey,
     server_addr: SocketAddr,
     next_send_nonce: Nonce8,
+    last_recv_nonce: Nonce8,
 }
 
 impl ClientSock {
@@ -127,6 +128,7 @@ impl ClientSock {
             server_long_term_pk: server_long_term_pk,
             server_addr: server_addr,
             next_send_nonce: next_send_nonce,
+            last_recv_nonce: Nonce8::new_zero(),
         })
     }
 
@@ -163,7 +165,20 @@ impl ClientSock {
     }
 
     fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
-        Err("Not implemented".into())
+        if server_msg_packet.payload_box.nonce <= self.last_recv_nonce {
+            return Err("Bad nonce".into());
+        }
+
+        let precomputed_key = try!(self.precomputed_key.as_ref().ok_or("Not connected yet"));
+
+        let msg = try!(server_msg_packet.payload_box.open_precomputed(precomputed_key)
+            .or(Err("Bad encrypted message")));
+
+        self.last_recv_nonce = server_msg_packet.payload_box.nonce;
+
+        try!(self.recv_tx.send(msg).or(Err("Couldnt write to recv channel")));
+
+        Ok(())
     }
 }
 
