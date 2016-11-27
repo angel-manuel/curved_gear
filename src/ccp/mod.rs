@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use mioco::{spawn};
 use mioco::udp::UdpSocket;
 use mioco::sync::mpsc::{channel, Receiver, Sender};
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
@@ -181,15 +182,18 @@ impl ServerSocket {
     }
 }
 
-pub struct Listener {
+struct ListenerInternal {
     my_extension: Extension,
     my_long_term_sk: server_long_term::SecretKey,
     minute_key: crypto_secretbox::Key,
     last_minute_key: crypto_secretbox::Key,
     conns: HashMap<(Extension, client_short_term::PublicKey), ServerConnection>,
     accept_tx: Sender<ServerSocket>,
-    accept_rx: Receiver<ServerSocket>,
     sock: UdpSocket,
+}
+
+pub struct Listener {
+    accept_rx: Receiver<ServerSocket>,
 }
 
 impl Listener {
@@ -197,22 +201,35 @@ impl Listener {
         let (_, my_long_term_sk, my_extension) = my_id.as_server();
         let (accept_tx, accept_rx) = channel();
 
-        Listener {
+        let mut listener_internal = ListenerInternal {
             my_extension: my_extension,
             my_long_term_sk: my_long_term_sk,
             minute_key: crypto_secretbox::gen_key(),
             last_minute_key: crypto_secretbox::gen_key(),
             conns: HashMap::new(),
             accept_tx: accept_tx,
-            accept_rx: accept_rx,
             sock: sock,
+        };
+
+        spawn(move || -> Result<()> {
+            loop {
+                let (packet, rem_addr) = try!(Packet::recv(&mut listener_internal.sock));
+                try!(listener_internal.process_packet(packet, rem_addr));
+            }
+        });
+
+        Listener {
+            accept_rx: accept_rx,
         }
     }
 
-    pub fn accept(&mut self) -> Result<ServerSocket> {
+    pub fn accept_sock(&mut self) -> Result<ServerSocket> {
         self.accept_rx.recv().or(Err("Couldnt read accept channel".into()))
     }
+}
 
+
+impl ListenerInternal {
     fn process_hello(&mut self, hello_packet: HelloPacket, rem_addr: SocketAddr) -> Result<()> {
         let client_short_term_pk = hello_packet.client_short_term_pk;
         let conn_key = (hello_packet.client_extension.clone(), client_short_term_pk.clone());
@@ -304,7 +321,7 @@ impl Listener {
     }
 }
 
-impl PacketProcessor for Listener {
+impl PacketProcessor for ListenerInternal {
     fn process_packet(&mut self, packet: Packet, rem_addr: SocketAddr) -> Result<()> {
         match packet {
             Packet::ClientMessage(client_msg_packet) => {
