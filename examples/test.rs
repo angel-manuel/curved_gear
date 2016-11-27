@@ -3,7 +3,6 @@ extern crate curved_gear;
 extern crate env_logger;
 extern crate mioco;
 
-use std::io;
 use std::net::SocketAddr;
 
 use curved_gear::*;
@@ -17,31 +16,32 @@ fn main() {
     let server_addr: SocketAddr = "0.0.0.0:7777".parse().unwrap();
     let remote_addr: SocketAddr = "127.0.0.1:7777".parse().unwrap();
 
-    mioco::start(|| -> io::Result<()> {
-        let listener = CCPListener::new(server_id.clone(), UdpSocket::bound(&server_addr).unwrap());
+    mioco::start(move || -> Result<()> {
+        let mut listener = CCPListener::new(server_id.clone(), UdpSocket::bound(&server_addr).unwrap());
 
-        mioco::spawn(|| -> io::Result<()> {
-            let mut sock = CCPSocket::connect(client_id, server_id.create_remote(remote_addr));
+        mioco::spawn(move || -> Result<()> {
+            let mut sock = try!(CCPClientSocket::connect(UdpSocket::v4().unwrap(),
+                client_id, server_id.create_remote(remote_addr)));
 
-            try!(conn.send("Hello world".as_bytes()));
-            let buf = try!(conn.read());
+            try!(sock.send("Hello world".as_bytes()));
+            let buf = try!(sock.recv());
             println!("{}", String::from_utf8_lossy(&buf));
 
             Ok(())
         });
 
         loop {
-            let mut conn = try!(listener.accept_sock());
+            let mut sock = try!(listener.accept_sock());
 
-            mioco::spawn(move || -> io::Result<()> {
+            mioco::spawn(move || -> Result<()> {
                 loop {
-                    let buf = try!(conn.read());
-                    if buf.len() == 0 { break; }
-                    try!(conn.write_all(&buf));
+                    let msg = try!(sock.recv());
+                    if msg.len() == 0 { break; }
+                    try!(sock.send(&msg));
                 }
 
                 Ok(())
             });
         }
-    }).unwrap();
+    }).unwrap().unwrap();
 }
