@@ -51,9 +51,9 @@ impl Demultiplexor {
         listener
     }
 
-    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Result<Rc<RefCell<ClientSock>>> {
+    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Result<Rc<RefCell<ClientSocket>>> {
         let client_extension = client_id.extension.clone();
-        let client = Rc::new(RefCell::new(try!(ClientSock::connect(&mut self.sock, client_id, remote_id))));
+        let client = Rc::new(RefCell::new(try!(ClientSocket::connect(&mut self.sock, client_id, remote_id))));
 
         self.packet_processors.insert(client_extension, Rc::downgrade(&client) as Weak<RefCell<PacketProcessor>>);
 
@@ -78,7 +78,7 @@ impl Demultiplexor {
     }
 }
 
-pub struct ClientSock {
+pub struct ClientSocket {
     recv_rx: Receiver<Vec<u8>>,
     recv_tx: Sender<Vec<u8>>,
     my_long_term_pk: client_long_term::PublicKey,
@@ -94,8 +94,8 @@ pub struct ClientSock {
     last_recv_nonce: Nonce8,
 }
 
-impl ClientSock {
-    pub fn connect(sock: &mut UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSock> {
+impl ClientSocket {
+    pub fn connect(sock: &mut UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
         let (recv_tx, recv_rx) = channel();
         let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_client();
         let (my_short_term_pk, my_short_term_sk) = client_short_term::gen_keypair();
@@ -112,10 +112,10 @@ impl ClientSock {
 
         try!(hello_packet.send(sock, &server_addr));
 
-        // TODO: recv from demultiplexor somehow. Maybe split ClientSockSeed and proper ClientSock
+        // TODO: recv from demultiplexor somehow. Maybe split ClientSocketSeed and proper ClientSocket
         // Maybe a PacketProcessor closure. What about non-demultiplexed ones?
 
-        Ok(ClientSock {
+        Ok(ClientSocket {
             recv_rx: recv_rx,
             recv_tx: recv_tx,
             my_long_term_pk: my_long_term_pk,
@@ -182,7 +182,7 @@ impl ClientSock {
     }
 }
 
-impl PacketProcessor for ClientSock {
+impl PacketProcessor for ClientSocket {
     fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
         match packet {
             Packet::ServerMessage(server_msg_packet) => {

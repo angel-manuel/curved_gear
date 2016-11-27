@@ -21,26 +21,23 @@ fn main() {
         let listener = CCPListener::new(server_id.clone(), UdpSocket::bound(&server_addr).unwrap());
 
         mioco::spawn(|| -> io::Result<()> {
-            let mut conn = CCPStream::connect(client_id, server_id.create_remote(remote_addr));
-            let mut buf = [0u8; 1024];
+            let mut sock = CCPSocket::connect(client_id, server_id.create_remote(remote_addr));
 
-            try!(conn.write_all("Hello world".as_bytes()));
-            let read_len = try!(conn.read(&mut buf));
-            println!("{}", String::from_utf8_lossy(&buf[0..read_len]));
+            try!(conn.send("Hello world".as_bytes()));
+            let buf = try!(conn.read());
+            println!("{}", String::from_utf8_lossy(&buf));
 
             Ok(())
         });
 
         loop {
-            let mut conn = try!(listener.accept());
+            let mut conn = try!(listener.accept_sock());
 
             mioco::spawn(move || -> io::Result<()> {
-                let mut buf = [0u8; 1024];
-
                 loop {
-                    let read_len = try!(conn.read(&mut buf));
-                    if read_len == 0 { break; }
-                    try!(conn.write_all(&buf[..read_len]));
+                    let buf = try!(conn.read());
+                    if buf.len() == 0 { break; }
+                    try!(conn.write_all(&buf));
                 }
 
                 Ok(())
