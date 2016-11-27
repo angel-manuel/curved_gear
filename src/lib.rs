@@ -25,4 +25,4 @@ pub mod ccp;
 
 pub use identity::{Identity, Extension, RemoteServer};
 pub use keys::*;
-pub use ccp::{Stream as CCPStream, Listener as CCPListener};
+pub use ccp::{Socket as CCPSocket, Listener as CCPListener};

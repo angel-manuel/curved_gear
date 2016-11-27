@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::rc::{Rc, Weak};
-use std::cell::RefCell;
 
 use mioco::udp::UdpSocket;
 use mioco::sync::mpsc::{channel, Receiver, Sender};
-use bincode::rustc_serialize as bcode_rcs;
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
 
 use ::Result;
@@ -15,92 +12,48 @@ use keys::*;
 use boxes::*;
 use nonces::*;
 
-pub struct Stream {
-
+pub enum Socket {
+    Client(ClientSocket),
+    Server(ServerSocket),
 }
 
-impl Stream {
-    pub fn new() -> Stream {
-        Stream {}
+impl Socket {
+    pub fn recv(&mut self) -> Result<Vec<u8>> {
+        match *self {
+            Socket::Client(ref mut client) => client.recv(),
+            Socket::Server(ref mut server) => server.recv(),
+        }
+    }
+
+    pub fn send(&mut self, msg: &[u8]) -> Result<usize> {
+        match *self {
+            Socket::Client(ref mut client) => client.send(msg),
+            Socket::Server(ref mut server) => server.send(msg),
+        }
     }
 }
 
 trait PacketProcessor {
-    fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()>;
-}
-
-pub struct Demultiplexor {
-    sock: UdpSocket,
-    packet_processors: HashMap<Extension, Weak<RefCell<PacketProcessor>>>,
-}
-
-impl Demultiplexor {
-    pub fn new(sock: UdpSocket) -> Demultiplexor {
-        Demultiplexor {
-            sock: sock,
-            packet_processors: HashMap::new(),
-        }
-    }
-
-    pub fn create_listener(&mut self, listener_id: Identity) -> Rc<RefCell<Listener>> {
-        let listener_extension = listener_id.extension.clone();
-        let listener = Rc::new(RefCell::new(Listener::new(listener_id)));
-
-        self.packet_processors.insert(listener_extension, Rc::downgrade(&listener) as Weak<RefCell<PacketProcessor>>);
-
-        listener
-    }
-
-    pub fn create_client(&mut self, client_id: Identity, remote_id: RemoteServer) -> Result<Rc<RefCell<ClientSocket>>> {
-        let client_extension = client_id.extension.clone();
-        let client = Rc::new(RefCell::new(try!(ClientSocket::connect(&mut self.sock, client_id, remote_id))));
-
-        self.packet_processors.insert(client_extension, Rc::downgrade(&client) as Weak<RefCell<PacketProcessor>>);
-
-        Ok(client)
-    }
-
-    pub fn listen(&mut self) -> Result<()> {
-        let mut buf = [0u8; PACKET_MAX_SIZE];
-        loop {
-            let (recv_len, rem_addr) = try!(self.sock.recv(&mut buf));
-            let packet: Packet = try!(bcode_rcs::decode(&buf[..recv_len]));
-
-            if let Some(ref mut packet_processor) = {
-                let dst_extension = packet.get_destination_extension();
-                self.packet_processors.get_mut(dst_extension).and_then(|packet_processor_weak|
-                    packet_processor_weak.upgrade()
-                )
-            } {
-                try!(packet_processor.borrow_mut().process_packet(packet, &mut self.sock, rem_addr));
-            }
-        }
-    }
+    fn process_packet(&mut self, packet: Packet, rem_addr: SocketAddr) -> Result<()>;
 }
 
 pub struct ClientSocket {
-    recv_rx: Receiver<Vec<u8>>,
-    recv_tx: Sender<Vec<u8>>,
-    my_long_term_pk: client_long_term::PublicKey,
-    my_long_term_sk: client_long_term::SecretKey,
     my_extension: Extension,
     my_short_term_pk: client_short_term::PublicKey,
-    my_short_term_sk: client_short_term::SecretKey,
-    precomputed_key: Option<PrecomputedKey>,
+    precomputed_key: PrecomputedKey,
     server_extension: Extension,
-    server_long_term_pk: server_long_term::PublicKey,
     server_addr: SocketAddr,
     next_send_nonce: Nonce8,
     last_recv_nonce: Nonce8,
+    sock: UdpSocket,
 }
 
 impl ClientSocket {
-    pub fn connect(sock: &mut UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
-        let (recv_tx, recv_rx) = channel();
+    pub fn connect(mut sock: UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
         let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_client();
         let (my_short_term_pk, my_short_term_sk) = client_short_term::gen_keypair();
         let mut next_send_nonce = Nonce8::new_low();
-        let RemoteServer { server_extension, server_long_term_pk, server_addr } = remote_id;
+        let RemoteServer { server_extension, server_long_term_pk, mut server_addr } = remote_id;
 
         let hello_packet: Packet = HelloPacket {
             server_extension: server_extension.clone(),
@@ -110,104 +63,98 @@ impl ClientSocket {
         }.into();
         next_send_nonce.increment();
 
-        try!(hello_packet.send(sock, &server_addr));
+        try!(hello_packet.send(&mut sock, &server_addr));
 
-        // TODO: recv from demultiplexor somehow. Maybe split ClientSocketSeed and proper ClientSocket
-        // Maybe a PacketProcessor closure. What about non-demultiplexed ones?
+        loop {
+            let (packet, rem_addr) = try!(Packet::recv(&mut sock));
 
-        Ok(ClientSocket {
-            recv_rx: recv_rx,
-            recv_tx: recv_tx,
-            my_long_term_pk: my_long_term_pk,
-            my_long_term_sk: my_long_term_sk,
-            my_extension: my_extension,
-            my_short_term_pk: my_short_term_pk,
-            my_short_term_sk: my_short_term_sk,
-            precomputed_key: None,
-            server_extension: server_extension,
-            server_long_term_pk: server_long_term_pk,
-            server_addr: server_addr,
-            next_send_nonce: next_send_nonce,
-            last_recv_nonce: Nonce8::new_zero(),
-        })
+            if let Packet::Cookie(cookie_packet) = packet {
+                let cookie_box = cookie_packet.cookie_box.open(&server_long_term_pk, &my_short_term_sk).unwrap();
+                let server_short_term_pk = cookie_box.server_short_term_pk;
+                let precomputed_key = PrecomputedKey::precompute_at_client(&server_short_term_pk, &my_short_term_sk);
+
+                let initiate_packet: Packet = InitiatePacket {
+                    server_extension: server_extension.clone(),
+                    client_extension: my_extension.clone(),
+                    client_short_term_pk: my_short_term_pk.clone(),
+                    server_cookie: cookie_box.server_cookie,
+                    initiate_box: PlainInitiateBox {
+                        client_long_term_pk: my_long_term_pk.clone(),
+                        vouch: PlainVouch {
+                            client_short_term_pk: my_short_term_pk.clone(),
+                        }.seal(&Nonce16::new_random(), &server_long_term_pk, &my_long_term_sk),
+                        domain_name: DomainName::new_empty(),
+                    }.seal_precomputed(&next_send_nonce, &precomputed_key, None),
+                }.into();
+                next_send_nonce.increment();
+
+                try!(initiate_packet.send(&mut sock, &server_addr));
+
+                server_addr = rem_addr;
+
+                return Ok(ClientSocket {
+                    my_extension: my_extension,
+                    my_short_term_pk: my_short_term_pk,
+                    precomputed_key: precomputed_key,
+                    server_extension: server_extension,
+                    server_addr: server_addr,
+                    next_send_nonce: next_send_nonce,
+                    last_recv_nonce: Nonce8::new_zero(),
+                    sock: sock,
+                });
+            }
+        }
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
-        self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()))
+        loop {
+            let (packet, rem_addr) = try!(Packet::recv(&mut self.sock));
+
+            if let Packet::ServerMessage(server_msg_packet) = packet {
+                if server_msg_packet.payload_box.nonce <= self.last_recv_nonce {
+                    return Err("Bad nonce".into());
+                }
+
+                let msg = try!(server_msg_packet.payload_box.open_precomputed(&self.precomputed_key)
+                    .or(Err("Bad encrypted message")));
+
+                self.last_recv_nonce = server_msg_packet.payload_box.nonce;
+                self.server_addr = rem_addr;
+
+                return Ok(msg);
+            }
+        }
     }
 
-    fn process_cookie_packet(&mut self, cookie_packet: CookiePacket, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
-        let cookie_box = cookie_packet.cookie_box.open(&self.server_long_term_pk, &self.my_short_term_sk).unwrap();
-        let server_short_term_pk = cookie_box.server_short_term_pk;
-        let precomputed_key = PrecomputedKey::precompute_at_client(&server_short_term_pk, &self.my_short_term_sk);
-
-        let initiate_packet: Packet = InitiatePacket {
+    pub fn send(&mut self, msg: &[u8]) -> Result<usize> {
+        let client_msg_packet: Packet = ClientMessagePacket {
             server_extension: self.server_extension.clone(),
             client_extension: self.my_extension.clone(),
             client_short_term_pk: self.my_short_term_pk.clone(),
-            server_cookie: cookie_box.server_cookie,
-            initiate_box: PlainInitiateBox {
-                client_long_term_pk: self.my_long_term_pk.clone(),
-                vouch: PlainVouch {
-                    client_short_term_pk: self.my_short_term_pk.clone(),
-                }.seal(&Nonce16::new_random(), &self.server_long_term_pk, &self.my_long_term_sk),
-                domain_name: DomainName::new_empty(),
-            }.seal_precomputed(&self.next_send_nonce, &precomputed_key, None),
+            payload_box: ClientMessageBox::seal_precomputed(msg, &self.next_send_nonce,
+                &self.precomputed_key),
         }.into();
+
         self.next_send_nonce.increment();
 
-        try!(initiate_packet.send(sock, &rem_addr));
+        let sent = try!(client_msg_packet.send(&mut self.sock, &self.server_addr));
 
-        self.precomputed_key = Some(precomputed_key);
-        self.server_addr = rem_addr;
-
-        Ok(())
-    }
-
-    fn process_server_msg(&mut self, server_msg_packet: ServerMessagePacket) -> Result<()> {
-        if server_msg_packet.payload_box.nonce <= self.last_recv_nonce {
-            return Err("Bad nonce".into());
+        if sent >= CLIENT_MSG_PACKET_BASE_SIZE {
+            Ok(sent - CLIENT_MSG_PACKET_BASE_SIZE)
+        } else {
+            Err("Header trimmed".into())
         }
-
-        let precomputed_key = try!(self.precomputed_key.as_ref().ok_or("Not connected yet"));
-
-        let msg = try!(server_msg_packet.payload_box.open_precomputed(precomputed_key)
-            .or(Err("Bad encrypted message")));
-
-        self.last_recv_nonce = server_msg_packet.payload_box.nonce;
-
-        try!(self.recv_tx.send(msg).or(Err("Couldnt write to recv channel")));
-
-        Ok(())
-    }
-}
-
-impl PacketProcessor for ClientSocket {
-    fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
-        match packet {
-            Packet::ServerMessage(server_msg_packet) => {
-                try!(self.process_server_msg(server_msg_packet));
-            },
-            Packet::Cookie(cookie_packet) => {
-                try!(self.process_cookie_packet(cookie_packet, sock, rem_addr));
-            },
-            _ => {
-                debug!("Unvalid packet type");
-            }
-        }
-
-        Ok(())
     }
 }
 
 pub struct ServerSocket {
     recv_rx: Receiver<Vec<u8>>,
-    sock: UdpSocket,
     rem_addr: SocketAddr,
     client_extension: Extension,
     my_extension: Extension,
     precomputed_key: PrecomputedKey,
     next_send_nonce: Nonce8,
+    sock: UdpSocket,
 }
 
 impl ServerSocket {
@@ -242,10 +189,11 @@ pub struct Listener {
     conns: HashMap<(Extension, client_short_term::PublicKey), ServerConnection>,
     accept_tx: Sender<ServerSocket>,
     accept_rx: Receiver<ServerSocket>,
+    sock: UdpSocket,
 }
 
 impl Listener {
-    fn new(my_id: Identity) -> Listener {
+    pub fn new(my_id: Identity, sock: UdpSocket) -> Listener {
         let (_, my_long_term_sk, my_extension) = my_id.as_server();
         let (accept_tx, accept_rx) = channel();
 
@@ -257,6 +205,7 @@ impl Listener {
             conns: HashMap::new(),
             accept_tx: accept_tx,
             accept_rx: accept_rx,
+            sock: sock,
         }
     }
 
@@ -264,7 +213,7 @@ impl Listener {
         self.accept_rx.recv().or(Err("Couldnt read accept channel".into()))
     }
 
-    fn process_hello(&self, hello_packet: HelloPacket, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+    fn process_hello(&mut self, hello_packet: HelloPacket, rem_addr: SocketAddr) -> Result<()> {
         let client_short_term_pk = hello_packet.client_short_term_pk;
         let conn_key = (hello_packet.client_extension.clone(), client_short_term_pk.clone());
 
@@ -289,12 +238,12 @@ impl Listener {
             }.seal(&Nonce16::new_random(), &client_short_term_pk, &self.my_long_term_sk),
         }.into();
 
-        try!(cookie_packet.send(sock, &rem_addr));
+        try!(cookie_packet.send(&mut self.sock, &rem_addr));
 
         Ok(())
     }
 
-    fn process_initiate(&mut self, initiate_packet: InitiatePacket, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+    fn process_initiate(&mut self, initiate_packet: InitiatePacket, rem_addr: SocketAddr) -> Result<()> {
         let conn_key = (initiate_packet.client_extension.clone(), initiate_packet.client_short_term_pk.clone());
 
         if self.conns.contains_key(&conn_key) {
@@ -332,7 +281,7 @@ impl Listener {
 
         let new_sock = ServerSocket {
             recv_rx: recv_rx,
-            sock: sock.try_clone().unwrap(),
+            sock: self.sock.try_clone().unwrap(),
             rem_addr: rem_addr,
             client_extension: initiate_packet.client_extension.clone(),
             my_extension: self.my_extension.clone(),
@@ -343,7 +292,7 @@ impl Listener {
         self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
     }
 
-    fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, _sock: &mut UdpSocket, _rem_addr: SocketAddr) -> Result<()> {
+    fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, _rem_addr: SocketAddr) -> Result<()> {
         let conn_key = (client_msg_packet.client_extension.clone(),
                         client_msg_packet.client_short_term_pk.clone());
 
@@ -356,16 +305,16 @@ impl Listener {
 }
 
 impl PacketProcessor for Listener {
-    fn process_packet(&mut self, packet: Packet, sock: &mut UdpSocket, rem_addr: SocketAddr) -> Result<()> {
+    fn process_packet(&mut self, packet: Packet, rem_addr: SocketAddr) -> Result<()> {
         match packet {
             Packet::ClientMessage(client_msg_packet) => {
-                try!(self.process_client_msg(client_msg_packet, sock, rem_addr));
+                try!(self.process_client_msg(client_msg_packet, rem_addr));
             },
             Packet::Initiate(initiate_packet) => {
-                try!(self.process_initiate(initiate_packet, sock, rem_addr));
+                try!(self.process_initiate(initiate_packet, rem_addr));
             },
             Packet::Hello(hello_packet) => {
-                try!(self.process_hello(hello_packet, sock, rem_addr));
+                try!(self.process_hello(hello_packet, rem_addr));
             },
             _ => {
                 debug!("Unvalid packet type");
