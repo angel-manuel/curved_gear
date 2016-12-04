@@ -7,6 +7,7 @@ extern crate byteorder;
 extern crate ascii;
 #[macro_use]
 extern crate log;
+#[macro_use]
 extern crate mioco;
 
 pub mod error;

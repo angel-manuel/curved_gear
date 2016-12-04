@@ -26,22 +26,26 @@ fn main() {
             try!(sock.send("Hello world".as_bytes()));
             let buf = try!(sock.recv());
             println!("{}", String::from_utf8_lossy(&buf));
+            try!(sock.send("".as_bytes()));
 
             Ok(())
         });
 
-        loop {
+        {
             let mut sock = try!(listener.accept_sock());
 
-            mioco::spawn(move || -> Result<()> {
+            try!(mioco::spawn(move || -> Result<()> {
                 loop {
                     let msg = try!(sock.recv());
+                    println!("msg.len() = {}", msg.len());
                     if msg.len() == 0 { break; }
                     try!(sock.send(&msg));
                 }
 
                 Ok(())
-            });
+            }).join().unwrap());
         }
+
+        Ok(())
     }).unwrap().unwrap();
 }

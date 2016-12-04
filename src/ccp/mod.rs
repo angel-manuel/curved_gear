@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use mioco::{spawn};
+use mioco;
 use mioco::udp::UdpSocket;
 use mioco::sync::mpsc::{channel, Receiver, Sender};
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
@@ -190,16 +190,19 @@ struct ListenerInternal {
     conns: HashMap<(Extension, client_short_term::PublicKey), ServerConnection>,
     accept_tx: Sender<ServerSocket>,
     sock: UdpSocket,
+    internal_rx: Receiver<()>,
 }
 
 pub struct Listener {
     accept_rx: Receiver<ServerSocket>,
+    internal_tx: Sender<()>,
 }
 
 impl Listener {
     pub fn new(my_id: Identity, sock: UdpSocket) -> Listener {
         let (_, my_long_term_sk, my_extension) = my_id.as_server();
         let (accept_tx, accept_rx) = channel();
+        let (internal_tx, internal_rx) = channel();
 
         let mut listener_internal = ListenerInternal {
             my_extension: my_extension,
@@ -209,17 +212,28 @@ impl Listener {
             conns: HashMap::new(),
             accept_tx: accept_tx,
             sock: sock,
+            internal_rx: internal_rx,
         };
 
-        spawn(move || -> Result<()> {
+        mioco::spawn(move || -> Result<()> {
             loop {
-                let (packet, rem_addr) = try!(Packet::recv(&mut listener_internal.sock));
-                try!(listener_internal.process_packet(packet, rem_addr));
+                select!(
+                    r:listener_internal.internal_rx => {
+                        break;
+                    },
+                    r:listener_internal.sock => {
+                        let (packet, rem_addr) = try!(Packet::recv(&mut listener_internal.sock));
+                        try!(listener_internal.process_packet(packet, rem_addr));
+                    }
+                );
             }
+
+            Ok(())
         });
 
         Listener {
             accept_rx: accept_rx,
+            internal_tx: internal_tx,
         }
     }
 
@@ -228,6 +242,12 @@ impl Listener {
     }
 }
 
+impl Drop for Listener {
+    fn drop(&mut self) {
+        println!("Dropping listener!");
+        self.internal_tx.send(()).unwrap();
+    }
+}
 
 impl ListenerInternal {
     fn process_hello(&mut self, hello_packet: HelloPacket, rem_addr: SocketAddr) -> Result<()> {
