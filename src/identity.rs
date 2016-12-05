@@ -56,6 +56,7 @@ impl Identity {
     }
 }
 
+#[derive(Clone)]
 pub struct RemoteServer {
     pub server_long_term_pk: server_long_term::PublicKey,
     pub server_addr: SocketAddr,
