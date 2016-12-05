@@ -15,24 +15,33 @@ fn main() {
     let server_id = Identity::new(Extension::from_barr(b"server"));
     let server_addr: SocketAddr = "0.0.0.0:7777".parse().unwrap();
     let remote_addr: SocketAddr = "127.0.0.1:7777".parse().unwrap();
+    let remote_id = server_id.create_remote(remote_addr);
 
     mioco::start(move || -> Result<()> {
         let mut listener = CCPListener::new(server_id.clone(), UdpSocket::bound(&server_addr).unwrap());
 
-        mioco::spawn(move || -> Result<()> {
-            let mut sock = try!(CCPClientSocket::connect(UdpSocket::v4().unwrap(),
-                client_id, server_id.create_remote(remote_addr)));
+        for i in 1..5 {
+            let client_id_c = client_id.clone();
+            let remote_id_c = remote_id.clone();
 
-            try!(sock.send("Hello world".as_bytes()));
-            let buf = try!(sock.recv());
-            println!("{}", String::from_utf8_lossy(&buf));
-            try!(sock.send("".as_bytes()));
+            mioco::spawn(move || -> Result<()> {
+                let mut sock = try!(CCPClientSocket::connect(UdpSocket::v4().unwrap(),
+                    client_id_c, remote_id_c));
 
-            Ok(())
-        });
+                println!("Client connection {}", i);
+                try!(sock.send("Hello world".as_bytes()));
+                let buf = try!(sock.recv());
+                println!("{}", String::from_utf8_lossy(&buf));
+                try!(sock.send("".as_bytes()));
 
-        {
+                Ok(())
+            });
+        }
+
+        for i in 1..5 {
             let mut sock = try!(listener.accept_sock());
+
+            println!("Server connection {}", i);
 
             mioco::spawn(move || -> Result<()> {
                 loop {
