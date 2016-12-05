@@ -156,6 +156,7 @@ pub struct ServerSocket {
     precomputed_key: PrecomputedKey,
     next_send_nonce: Nonce8,
     sock: UdpSocket,
+    internal_tx: Sender<()>,
 }
 
 impl ServerSocket {
@@ -182,6 +183,12 @@ impl ServerSocket {
     }
 }
 
+impl Drop for ServerSocket {
+    fn drop(&mut self) {
+        self.internal_tx.send(()).unwrap();
+    }
+}
+
 struct ListenerInternal {
     my_extension: Extension,
     my_long_term_sk: server_long_term::SecretKey,
@@ -191,6 +198,8 @@ struct ListenerInternal {
     accept_tx: Sender<ServerSocket>,
     sock: UdpSocket,
     internal_rx: Receiver<()>,
+    count: u32,
+    internal_tx: Sender<()>,
 }
 
 pub struct Listener {
@@ -213,13 +222,20 @@ impl Listener {
             accept_tx: accept_tx,
             sock: sock,
             internal_rx: internal_rx,
+            count: 1,
+            internal_tx: internal_tx.clone(),
         };
 
         mioco::spawn(move || -> Result<()> {
             loop {
                 select!(
                     r:listener_internal.internal_rx => {
-                        break;
+                        let _read = try!(listener_internal.internal_rx.recv()
+                            .or(Err("Couldn't empty internal_chan stack")));
+                        listener_internal.count = listener_internal.count.saturating_sub(1);
+                        if listener_internal.count == 0 {
+                            break;
+                        }
                     },
                     r:listener_internal.sock => {
                         let (packet, rem_addr) = try!(Packet::recv(&mut listener_internal.sock));
@@ -244,7 +260,6 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        println!("Dropping listener!");
         self.internal_tx.send(()).unwrap();
     }
 }
@@ -324,7 +339,10 @@ impl ListenerInternal {
             my_extension: self.my_extension.clone(),
             precomputed_key: precomputed_key,
             next_send_nonce: Nonce8::new_low(),
+            internal_tx: self.internal_tx.clone(),
         };
+
+        self.count = self.count.checked_add(1).unwrap();
 
         self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
     }

@@ -34,7 +34,7 @@ fn main() {
         {
             let mut sock = try!(listener.accept_sock());
 
-            try!(mioco::spawn(move || -> Result<()> {
+            mioco::spawn(move || -> Result<()> {
                 loop {
                     let msg = try!(sock.recv());
                     println!("msg.len() = {}", msg.len());
@@ -43,7 +43,7 @@ fn main() {
                 }
 
                 Ok(())
-            }).join().unwrap());
+            });
         }
 
         Ok(())
