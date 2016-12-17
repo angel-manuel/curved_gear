@@ -1,8 +1,11 @@
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use mioco::udp::UdpSocket;
+use mioco::sync::mpsc::{channel, Receiver};
 
 use ::Result;
+use super::demultiplexor::Demultiplexor;
 use identity::{Identity, Extension, RemoteServer, DomainName};
 use packet::*;
 use keys::*;
@@ -18,14 +21,25 @@ pub struct ClientSocket {
     next_send_nonce: Nonce8,
     last_recv_nonce: Nonce8,
     sock: UdpSocket,
+    _demultiplexor: Arc<Mutex<Demultiplexor>>, // Just here so we dont drop the demux
+    recv_rx: Receiver<(Packet, SocketAddr)>,
 }
 
 impl ClientSocket {
-    pub fn connect(mut sock: UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
+    pub fn connect(sock: UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
+        let demux = Arc::new(Mutex::new(Demultiplexor::new(sock)));
+        ClientSocket::connect_with_demultiplexor(demux, my_id, remote_id)
+    }
+
+    fn connect_with_demultiplexor(demultiplexor: Arc<Mutex<Demultiplexor>>, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
         let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_client();
         let (my_short_term_pk, my_short_term_sk) = client_short_term::gen_keypair();
         let mut next_send_nonce = Nonce8::new_low();
         let RemoteServer { server_extension, server_long_term_pk, mut server_addr } = remote_id;
+        let mut sock = {
+            let mut demux = try!(demultiplexor.lock().or(Err("Couldn't lock demultiplexor")));
+            demux.get_mut_sock().try_clone().unwrap()
+        };
 
         let hello_packet: Packet = HelloPacket {
             server_extension: server_extension.clone(),
@@ -37,8 +51,14 @@ impl ClientSocket {
 
         try!(hello_packet.send(&mut sock, &server_addr));
 
+        let (recv_tx, recv_rx) = channel();
+        {
+            let mut demux = try!(demultiplexor.lock().or(Err("Couldn't lock demultiplexor")));
+            demux.add_listener(my_extension.clone(), recv_tx);
+        }
+
         loop {
-            let (packet, rem_addr) = try!(Packet::recv(&mut sock));
+            let (packet, rem_addr) = try!(recv_rx.recv().or(Err("Couldn't read recv_rx")));
 
             if let Packet::Cookie(cookie_packet) = packet {
                 let cookie_box = cookie_packet.cookie_box.open(&server_long_term_pk, &my_short_term_sk).unwrap();
@@ -73,6 +93,8 @@ impl ClientSocket {
                     next_send_nonce: next_send_nonce,
                     last_recv_nonce: Nonce8::new_zero(),
                     sock: sock,
+                    _demultiplexor: demultiplexor,
+                    recv_rx: recv_rx,
                 });
             }
         }
@@ -80,7 +102,7 @@ impl ClientSocket {
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         loop {
-            let (packet, rem_addr) = try!(Packet::recv(&mut self.sock));
+            let (packet, rem_addr) = try!(self.recv_rx.recv().or(Err("Couldn't read recv_rx")));
 
             if let Packet::ServerMessage(server_msg_packet) = packet {
                 if server_msg_packet.payload_box.nonce <= self.last_recv_nonce {

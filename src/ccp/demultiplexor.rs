@@ -14,45 +14,50 @@ use packet::*;
 pub struct Demultiplexor {
     clients: Arc<RwLock<HashMap<Extension, ClientConnection>>>,
     internal_tx: Sender<()>,
+    sock: UdpSocket,
 }
 
 impl Demultiplexor {
-    pub fn new(mut sock: UdpSocket) -> Demultiplexor {
+    pub fn new(sock: UdpSocket) -> Demultiplexor {
         let (internal_tx, internal_rx) = channel();
-        let clients_hash = Arc::new(RwLock::new(HashMap::<Extension, ClientConnection>::new()));
+        let clients = Arc::new(RwLock::new(HashMap::<Extension, ClientConnection>::new()));
 
-        let clients = clients_hash.clone();
-        mioco::spawn(move || -> Result<()> {
-            loop {
-                select!(
-                    r:sock => {
-                        let (packet, rem_addr) = try!(Packet::recv(&mut sock));
-                        let client_extension = packet.get_destination_extension().clone();
+        {
+            let clients = clients.clone();
+            let mut sock = sock.try_clone().unwrap();
+            mioco::spawn(move || -> Result<()> {
+                loop {
+                    select!(
+                        r:sock => {
+                            let (packet, rem_addr) = try!(Packet::recv(&mut sock));
+                            let client_extension = packet.get_destination_extension().clone();
 
-                        let clients_hnd = try!(clients.read().or(Err("Poisoined clients hash")));
+                            let clients_hnd = try!(clients.read().or(Err("Poisoined clients hash")));
 
-                        if let Some(client_conn) = clients_hnd.get(&client_extension) {
-                            let recv_tx = try!(client_conn.recv_tx.lock()
-                                .or(Err("Couldn't lock client recv_tx")));
-                            try!(recv_tx.send((packet, rem_addr))
-                                .or(Err("Couldn't send packet to client_conn")));
+                            if let Some(client_conn) = clients_hnd.get(&client_extension) {
+                                let recv_tx = try!(client_conn.recv_tx.lock()
+                                    .or(Err("Couldn't lock client recv_tx")));
+                                try!(recv_tx.send((packet, rem_addr))
+                                    .or(Err("Couldn't send packet to client_conn")));
+                            }
+                        },
+                        r:internal_rx => {
+                            let _read = try!(internal_rx.recv()
+                                .or(Err("Couldn't empty internal_chan stack")));
+
+                            break;
                         }
-                    },
-                    r:internal_rx => {
-                        let _read = try!(internal_rx.recv()
-                            .or(Err("Couldn't empty internal_chan stack")));
+                    );
+                }
 
-                        break;
-                    }
-                );
-            }
-
-            Ok(())
-        });
+                Ok(())
+            });
+        }
 
         Demultiplexor {
-            clients: clients_hash,
+            clients: clients,
             internal_tx: internal_tx,
+            sock: sock,
         }
     }
 
@@ -64,6 +69,10 @@ impl Demultiplexor {
     pub fn remove_listener(&mut self, extension: &Extension) {
         let mut clients_hnd = self.clients.write().unwrap();
         clients_hnd.remove(extension);
+    }
+
+    pub fn get_mut_sock(&mut self) -> &mut UdpSocket {
+        &mut self.sock
     }
 }
 
