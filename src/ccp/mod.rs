@@ -5,9 +5,11 @@ use packet::*;
 
 mod client_socket;
 mod server_socket;
+mod demultiplexor;
 
 pub use self::client_socket::ClientSocket;
 pub use self::server_socket::{ServerSocket, Listener};
+pub use self::demultiplexor::Demultiplexor;
 
 pub enum Socket {
     Client(ClientSocket),

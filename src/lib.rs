@@ -26,4 +26,5 @@ pub mod ccp;
 
 pub use identity::{Identity, Extension, RemoteServer};
 pub use keys::*;
-pub use ccp::{Socket as CCPSocket, ClientSocket as CCPClientSocket, ServerSocket as CCPServerSocket, Listener as CCPListener};
+pub use ccp::{Socket as CCPSocket, ClientSocket as CCPClientSocket, ServerSocket as CCPServerSocket,
+    Listener as CCPListener, Demultiplexor as CCPDemultiplexor};

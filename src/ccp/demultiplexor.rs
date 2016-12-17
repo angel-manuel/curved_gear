@@ -1,0 +1,78 @@
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+
+use mioco;
+use mioco::udp::UdpSocket;
+use mioco::sync::mpsc::{channel, Sender};
+use mioco::sync::RwLock;
+
+use ::Result;
+use identity::Extension;
+use packet::*;
+
+pub struct Demultiplexor {
+    clients: Arc<RwLock<HashMap<Extension, ClientConnection>>>,
+    internal_tx: Sender<()>,
+}
+
+impl Demultiplexor {
+    pub fn new(mut sock: UdpSocket) -> Demultiplexor {
+        let (internal_tx, internal_rx) = channel();
+        let clients_hash = Arc::new(RwLock::new(HashMap::<Extension, ClientConnection>::new()));
+
+        let clients = clients_hash.clone();
+        mioco::spawn(move || -> Result<()> {
+            loop {
+                select!(
+                    r:sock => {
+                        let (packet, rem_addr) = try!(Packet::recv(&mut sock));
+                        let client_extension = packet.get_destination_extension().clone();
+
+                        let clients_hnd = try!(clients.read().or(Err("Poisoined clients hash")));
+
+                        if let Some(client_conn) = clients_hnd.get(&client_extension) {
+                            let recv_tx = try!(client_conn.recv_tx.lock()
+                                .or(Err("Couldn't lock client recv_tx")));
+                            try!(recv_tx.send((packet, rem_addr))
+                                .or(Err("Couldn't send packet to client_conn")));
+                        }
+                    },
+                    r:internal_rx => {
+                        let _read = try!(internal_rx.recv()
+                            .or(Err("Couldn't empty internal_chan stack")));
+
+                        break;
+                    }
+                );
+            }
+
+            Ok(())
+        });
+
+        Demultiplexor {
+            clients: clients_hash,
+            internal_tx: internal_tx,
+        }
+    }
+
+    pub fn add_listener(&mut self, extension: Extension, listener: Sender<(Packet, SocketAddr)>) {
+        let mut clients_hnd = self.clients.write().unwrap();
+        clients_hnd.insert(extension, ClientConnection { recv_tx: Mutex::new(listener) });
+    }
+
+    pub fn remove_listener(&mut self, extension: &Extension) {
+        let mut clients_hnd = self.clients.write().unwrap();
+        clients_hnd.remove(extension);
+    }
+}
+
+impl Drop for Demultiplexor {
+    fn drop(&mut self) {
+        self.internal_tx.send(()).unwrap();
+    }
+}
+
+struct ClientConnection {
+    recv_tx: Mutex<Sender<(Packet, SocketAddr)>>,
+}
