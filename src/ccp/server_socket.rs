@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use mioco;
+use mioco::timer::Timer;
 use mioco::udp::UdpSocket;
 use mioco::sync::mpsc::{channel, Receiver, Sender};
 use sodiumoxide::crypto::secretbox as crypto_secretbox;
@@ -28,7 +29,20 @@ pub struct ServerSocket {
 
 impl ServerSocket {
     pub fn recv(&mut self) -> Result<Vec<u8>> {
-        self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()))
+        let mut timer = Timer::new();
+        timer.set_timeout(5000);
+
+        select!(
+            r:timer => {
+                let _ = timer.read();
+                return Err("Recv timeout".into());
+            },
+            r:self.recv_rx => {
+                return self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()));
+            }
+        );
+
+        unreachable!();
     }
 
     pub fn send(&mut self, msg: &[u8]) -> Result<usize> {

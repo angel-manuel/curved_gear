@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use mioco;
+use mioco::timer::Timer;
 use mioco::udp::UdpSocket;
 use mioco::sync::mpsc::{channel, Receiver};
 
@@ -25,6 +27,8 @@ pub struct ClientSocket {
     recv_rx: Receiver<(Packet, SocketAddr)>,
 }
 
+const MAX_TRIES: u8 = 3;
+
 impl ClientSocket {
     pub fn connect(sock: UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
         let demux = Demultiplexor::new(sock);
@@ -41,82 +45,105 @@ impl ClientSocket {
             demux.get_mut_sock().try_clone().unwrap()
         };
 
-        let hello_packet: Packet = HelloPacket {
-            server_extension: server_extension.clone(),
-            client_extension: my_extension.clone(),
-            client_short_term_pk: my_short_term_pk.clone(),
-            hello_box: PlainHelloBox::new_empty().seal(&next_send_nonce, &server_long_term_pk, &my_short_term_sk),
-        }.into();
-        next_send_nonce.increment();
-
-        try!(hello_packet.send(&mut sock, &server_addr));
-
         let (recv_tx, recv_rx) = channel();
         {
             let mut demux = try!(demultiplexor.lock().or(Err("Couldn't lock demultiplexor")));
             demux.add_listener(my_extension.clone(), recv_tx);
         }
 
-        loop {
-            let (packet, rem_addr) = try!(recv_rx.recv().or(Err("Couldn't read recv_rx")));
+        for _ in 0..MAX_TRIES {
+            let hello_packet: Packet = HelloPacket {
+                server_extension: server_extension.clone(),
+                client_extension: my_extension.clone(),
+                client_short_term_pk: my_short_term_pk.clone(),
+                hello_box: PlainHelloBox::new_empty().seal(&next_send_nonce, &server_long_term_pk, &my_short_term_sk),
+            }.into();
+            next_send_nonce.increment();
 
-            if let Packet::Cookie(cookie_packet) = packet {
-                let cookie_box = cookie_packet.cookie_box.open(&server_long_term_pk, &my_short_term_sk).unwrap();
-                let server_short_term_pk = cookie_box.server_short_term_pk;
-                let precomputed_key = PrecomputedKey::precompute_at_client(&server_short_term_pk, &my_short_term_sk);
+            try!(hello_packet.send(&mut sock, &server_addr));
 
-                let initiate_packet: Packet = InitiatePacket {
-                    server_extension: server_extension.clone(),
-                    client_extension: my_extension.clone(),
-                    client_short_term_pk: my_short_term_pk.clone(),
-                    server_cookie: cookie_box.server_cookie,
-                    initiate_box: PlainInitiateBox {
-                        client_long_term_pk: my_long_term_pk.clone(),
-                        vouch: PlainVouch {
+            let mut timer = Timer::new();
+            timer.set_timeout(2000);
+            select!(
+                r:timer => {
+                    let _ = timer.read();
+                    continue;
+                },
+                r:recv_rx => {
+                    let (packet, rem_addr) = try!(recv_rx.recv().or(Err("Couldn't read recv_rx")));
+
+                    if let Packet::Cookie(cookie_packet) = packet {
+                        let cookie_box = cookie_packet.cookie_box.open(&server_long_term_pk, &my_short_term_sk).unwrap();
+                        let server_short_term_pk = cookie_box.server_short_term_pk;
+                        let precomputed_key = PrecomputedKey::precompute_at_client(&server_short_term_pk, &my_short_term_sk);
+
+                        let initiate_packet: Packet = InitiatePacket {
+                            server_extension: server_extension.clone(),
+                            client_extension: my_extension.clone(),
                             client_short_term_pk: my_short_term_pk.clone(),
-                        }.seal(&Nonce16::new_random(), &server_long_term_pk, &my_long_term_sk),
-                        domain_name: DomainName::new_empty(),
-                    }.seal_precomputed(&next_send_nonce, &precomputed_key, None),
-                }.into();
-                next_send_nonce.increment();
+                            server_cookie: cookie_box.server_cookie,
+                            initiate_box: PlainInitiateBox {
+                                client_long_term_pk: my_long_term_pk.clone(),
+                                vouch: PlainVouch {
+                                    client_short_term_pk: my_short_term_pk.clone(),
+                                }.seal(&Nonce16::new_random(), &server_long_term_pk, &my_long_term_sk),
+                                domain_name: DomainName::new_empty(),
+                            }.seal_precomputed(&next_send_nonce, &precomputed_key, None),
+                        }.into();
+                        next_send_nonce.increment();
 
-                try!(initiate_packet.send(&mut sock, &server_addr));
+                        try!(initiate_packet.send(&mut sock, &server_addr));
 
-                server_addr = rem_addr;
+                        server_addr = rem_addr;
 
-                return Ok(ClientSocket {
-                    my_extension: my_extension,
-                    my_short_term_pk: my_short_term_pk,
-                    precomputed_key: precomputed_key,
-                    server_extension: server_extension,
-                    server_addr: server_addr,
-                    next_send_nonce: next_send_nonce,
-                    last_recv_nonce: Nonce8::new_zero(),
-                    sock: sock,
-                    demultiplexor: demultiplexor,
-                    recv_rx: recv_rx,
-                });
-            }
+                        return Ok(ClientSocket {
+                            my_extension: my_extension,
+                            my_short_term_pk: my_short_term_pk,
+                            precomputed_key: precomputed_key,
+                            server_extension: server_extension,
+                            server_addr: server_addr,
+                            next_send_nonce: next_send_nonce,
+                            last_recv_nonce: Nonce8::new_zero(),
+                            sock: sock,
+                            demultiplexor: demultiplexor,
+                            recv_rx: recv_rx,
+                        });
+                    }
+                }
+            );
         }
+
+        Err("Couldn't connect".into())
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
+        let mut timer = Timer::new();
+        timer.set_timeout(5000);
+
         loop {
-            let (packet, rem_addr) = try!(self.recv_rx.recv().or(Err("Couldn't read recv_rx")));
+            select!(
+                r:timer => {
+                    debug!("Client recv timeout");
+                    return Err("Couldn't recv".into());
+                },
+                r:self.recv_rx => {
+                    let (packet, rem_addr) = try!(self.recv_rx.recv().or(Err("Couldn't read recv_rx")));
 
-            if let Packet::ServerMessage(server_msg_packet) = packet {
-                if server_msg_packet.payload_box.nonce <= self.last_recv_nonce {
-                    return Err("Bad nonce".into());
+                    if let Packet::ServerMessage(server_msg_packet) = packet {
+                        if server_msg_packet.payload_box.nonce <= self.last_recv_nonce {
+                            return Err("Bad nonce".into());
+                        }
+
+                        let msg = try!(server_msg_packet.payload_box.open_precomputed(&self.precomputed_key)
+                            .or(Err("Bad encrypted message")));
+
+                        self.last_recv_nonce = server_msg_packet.payload_box.nonce;
+                        self.server_addr = rem_addr;
+
+                        return Ok(msg);
+                    }
                 }
-
-                let msg = try!(server_msg_packet.payload_box.open_precomputed(&self.precomputed_key)
-                    .or(Err("Bad encrypted message")));
-
-                self.last_recv_nonce = server_msg_packet.payload_box.nonce;
-                self.server_addr = rem_addr;
-
-                return Ok(msg);
-            }
+            );
         }
     }
 
