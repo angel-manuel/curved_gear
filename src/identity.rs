@@ -27,6 +27,12 @@ pub struct Identity {
     pub extension: Extension,
 }
 
+impl fmt::Display for Identity {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "{}", self.extension)
+    }
+}
+
 impl Identity {
     pub fn new(extension: Extension) -> Identity {
         let (pk, sk) = crypto_box::gen_keypair();

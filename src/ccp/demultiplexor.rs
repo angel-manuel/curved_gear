@@ -18,7 +18,7 @@ pub struct Demultiplexor {
 }
 
 impl Demultiplexor {
-    pub fn new(sock: UdpSocket) -> Demultiplexor {
+    pub fn new(sock: UdpSocket) -> Arc<Mutex<Demultiplexor>> {
         let (internal_tx, internal_rx) = channel();
         let clients = Arc::new(RwLock::new(HashMap::<Extension, ClientConnection>::new()));
 
@@ -54,20 +54,22 @@ impl Demultiplexor {
             });
         }
 
-        Demultiplexor {
+        Arc::new(Mutex::new(Demultiplexor {
             clients: clients,
             internal_tx: internal_tx,
             sock: sock,
-        }
+        }))
     }
 
     pub fn add_listener(&mut self, extension: Extension, listener: Sender<(Packet, SocketAddr)>) {
         let mut clients_hnd = self.clients.write().unwrap();
+        debug!("Adding listener to demultiplexor");
         clients_hnd.insert(extension, ClientConnection { recv_tx: Mutex::new(listener) });
     }
 
     pub fn remove_listener(&mut self, extension: &Extension) {
         let mut clients_hnd = self.clients.write().unwrap();
+        debug!("Removing listener from demultiplexor");
         clients_hnd.remove(extension);
     }
 
@@ -78,6 +80,7 @@ impl Demultiplexor {
 
 impl Drop for Demultiplexor {
     fn drop(&mut self) {
+        debug!("Dropping Demultiplexor");
         self.internal_tx.send(()).unwrap();
     }
 }

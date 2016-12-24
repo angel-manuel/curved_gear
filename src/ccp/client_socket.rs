@@ -21,17 +21,17 @@ pub struct ClientSocket {
     next_send_nonce: Nonce8,
     last_recv_nonce: Nonce8,
     sock: UdpSocket,
-    _demultiplexor: Arc<Mutex<Demultiplexor>>, // Just here so we dont drop the demux
+    demultiplexor: Arc<Mutex<Demultiplexor>>,
     recv_rx: Receiver<(Packet, SocketAddr)>,
 }
 
 impl ClientSocket {
     pub fn connect(sock: UdpSocket, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
-        let demux = Arc::new(Mutex::new(Demultiplexor::new(sock)));
+        let demux = Demultiplexor::new(sock);
         ClientSocket::connect_with_demultiplexor(demux, my_id, remote_id)
     }
 
-    fn connect_with_demultiplexor(demultiplexor: Arc<Mutex<Demultiplexor>>, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
+    pub fn connect_with_demultiplexor(demultiplexor: Arc<Mutex<Demultiplexor>>, my_id: Identity, remote_id: RemoteServer) -> Result<ClientSocket> {
         let (my_long_term_pk, my_long_term_sk, my_extension) = my_id.as_client();
         let (my_short_term_pk, my_short_term_sk) = client_short_term::gen_keypair();
         let mut next_send_nonce = Nonce8::new_low();
@@ -93,7 +93,7 @@ impl ClientSocket {
                     next_send_nonce: next_send_nonce,
                     last_recv_nonce: Nonce8::new_zero(),
                     sock: sock,
-                    _demultiplexor: demultiplexor,
+                    demultiplexor: demultiplexor,
                     recv_rx: recv_rx,
                 });
             }
@@ -138,5 +138,13 @@ impl ClientSocket {
         } else {
             Err("Header trimmed".into())
         }
+    }
+}
+
+impl Drop for ClientSocket {
+    fn drop(&mut self) {
+        debug!("Dropping ClientSocket");
+        let mut demux = self.demultiplexor.lock().expect("Couldn't lock demultiplexor");
+        demux.remove_listener(&self.my_extension);
     }
 }

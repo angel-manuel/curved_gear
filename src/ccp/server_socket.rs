@@ -52,6 +52,7 @@ impl ServerSocket {
 
 impl Drop for ServerSocket {
     fn drop(&mut self) {
+        debug!("Dropping ServerSocket");
         self.internal_tx.send(()).unwrap();
     }
 }
@@ -100,7 +101,9 @@ impl Listener {
                         let _read = try!(listener_internal.internal_rx.recv()
                             .or(Err("Couldn't empty internal_chan stack")));
                         listener_internal.count = listener_internal.count.saturating_sub(1);
+                        debug!("Removing from count. Now at {}", listener_internal.count);
                         if listener_internal.count == 0 {
+                            debug!("Killing listener");
                             break;
                         }
                     },
@@ -127,6 +130,7 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
+        debug!("Dropping Listener");
         self.internal_tx.send(()).unwrap();
     }
 }
@@ -210,6 +214,7 @@ impl ListenerInternal {
         };
 
         self.count = self.count.checked_add(1).unwrap();
+        debug!("Adding to count. Now at {}", self.count);
 
         self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
     }
