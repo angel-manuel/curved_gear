@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use mioco;
 use mioco::timer::Timer;
@@ -17,6 +18,21 @@ use nonces::*;
 use super::PacketProcessor;
 
 pub struct ServerSocket {
+    core: ServerSocketCore,
+    _listener_internal: Arc<Mutex<ListenerInternal>>,
+}
+
+impl ServerSocket {
+    pub fn recv(&mut self) -> Result<Vec<u8>> {
+        self.core.recv()
+    }
+
+    pub fn send(&mut self, msg: &[u8]) -> Result<usize> {
+        self.core.send(msg)
+    }
+}
+
+struct ServerSocketCore {
     recv_rx: Receiver<Vec<u8>>,
     rem_addr: SocketAddr,
     client_extension: Extension,
@@ -24,10 +40,9 @@ pub struct ServerSocket {
     precomputed_key: PrecomputedKey,
     next_send_nonce: Nonce8,
     sock: UdpSocket,
-    internal_tx: Sender<()>,
 }
 
-impl ServerSocket {
+impl ServerSocketCore {
     pub fn recv(&mut self) -> Result<Vec<u8>> {
         let mut timer = Timer::new();
         timer.set_timeout(5000);
@@ -38,7 +53,7 @@ impl ServerSocket {
                 return Err("Recv timeout".into());
             },
             r:self.recv_rx => {
-                return self.recv_rx.recv().or(Err("Couldnt read from recv channel".into()));
+                return self.recv_rx.recv().or(Err("Couldn't read from recv channel".into()));
             }
         );
 
@@ -64,10 +79,9 @@ impl ServerSocket {
     }
 }
 
-impl Drop for ServerSocket {
+impl Drop for ServerSocketCore {
     fn drop(&mut self) {
-        debug!("Dropping ServerSocket");
-        self.internal_tx.send(()).unwrap();
+        debug!("Dropping ServerSocketCore");
     }
 }
 
@@ -77,25 +91,21 @@ struct ListenerInternal {
     minute_key: crypto_secretbox::Key,
     last_minute_key: crypto_secretbox::Key,
     conns: HashMap<(Extension, client_short_term::PublicKey), ServerConnection>,
-    accept_tx: Sender<ServerSocket>,
+    accept_tx: Sender<ServerSocketCore>,
     sock: UdpSocket,
-    internal_rx: Receiver<()>,
-    count: u32,
-    internal_tx: Sender<()>,
 }
 
 pub struct Listener {
-    accept_rx: Receiver<ServerSocket>,
-    internal_tx: Sender<()>,
+    accept_rx: Receiver<ServerSocketCore>,
+    internal: Arc<Mutex<ListenerInternal>>,
 }
 
 impl Listener {
     pub fn new(my_id: Identity, sock: UdpSocket) -> Listener {
         let (_, my_long_term_sk, my_extension) = my_id.as_server();
         let (accept_tx, accept_rx) = channel();
-        let (internal_tx, internal_rx) = channel();
 
-        let mut listener_internal = ListenerInternal {
+        let listener_internal = Arc::new(Mutex::new(ListenerInternal {
             my_extension: my_extension,
             my_long_term_sk: my_long_term_sk,
             minute_key: crypto_secretbox::gen_key(),
@@ -103,29 +113,31 @@ impl Listener {
             conns: HashMap::new(),
             accept_tx: accept_tx,
             sock: sock,
-            internal_rx: internal_rx,
-            count: 1,
-            internal_tx: internal_tx.clone(),
-        };
+        }));
 
+        let listener_weak = Arc::downgrade(&listener_internal);
         mioco::spawn(move || -> Result<()> {
             loop {
-                select!(
-                    r:listener_internal.internal_rx => {
-                        let _read = try!(listener_internal.internal_rx.recv()
-                            .or(Err("Couldn't empty internal_chan stack")));
-                        listener_internal.count = listener_internal.count.saturating_sub(1);
-                        debug!("Removing from count. Now at {}", listener_internal.count);
-                        if listener_internal.count == 0 {
-                            debug!("Killing listener");
-                            break;
+                let listener_arc = listener_weak.upgrade();
+
+                if let Some(listener) = listener_arc {
+                    let mut listener_lock = try!(listener.lock().or(Err("Couldn't lock listener")));
+                    let mut timer = Timer::new();
+                    timer.set_timeout(1000);
+
+                    select!(
+                        r:timer => {
+                            continue;
+                        },
+                        r:listener_lock.sock => {
+                            let (packet, rem_addr) = try!(Packet::recv(&mut listener_lock.sock));
+                            try!(listener_lock.process_packet(packet, rem_addr));
                         }
-                    },
-                    r:listener_internal.sock => {
-                        let (packet, rem_addr) = try!(Packet::recv(&mut listener_internal.sock));
-                        try!(listener_internal.process_packet(packet, rem_addr));
-                    }
-                );
+                    );
+                } else {
+                    debug!("Killing listener coroutine");
+                    break;
+                }
             }
 
             Ok(())
@@ -133,19 +145,25 @@ impl Listener {
 
         Listener {
             accept_rx: accept_rx,
-            internal_tx: internal_tx,
+            internal: listener_internal,
         }
     }
 
     pub fn accept_sock(&mut self) -> Result<ServerSocket> {
-        self.accept_rx.recv().or(Err("Couldnt read accept channel".into()))
+        let server_socket_core = try!(self.accept_rx.recv().or(Err("Couldnt read accept channel")));
+
+        debug!("Accepting ServerSocket");
+
+        Ok(ServerSocket {
+            core: server_socket_core,
+            _listener_internal: self.internal.clone(),
+        })
     }
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
         debug!("Dropping Listener");
-        self.internal_tx.send(()).unwrap();
     }
 }
 
@@ -214,9 +232,9 @@ impl ListenerInternal {
         };
 
         self.conns.insert(conn_key, new_conn);
-        info!("\"{}\" accepting connection \"{}\"@{}", &self.my_extension, &initiate_packet.client_extension, &rem_addr);
+        info!("\"{}\" pre-accepting connection \"{}\"@{}", &self.my_extension, &initiate_packet.client_extension, &rem_addr);
 
-        let new_sock = ServerSocket {
+        let new_sock = ServerSocketCore {
             recv_rx: recv_rx,
             sock: self.sock.try_clone().unwrap(),
             rem_addr: rem_addr,
@@ -224,13 +242,11 @@ impl ListenerInternal {
             my_extension: self.my_extension.clone(),
             precomputed_key: precomputed_key,
             next_send_nonce: Nonce8::new_low(),
-            internal_tx: self.internal_tx.clone(),
         };
 
-        self.count = self.count.checked_add(1).unwrap();
-        debug!("Adding to count. Now at {}", self.count);
+        try!(self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel")));
 
-        self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel".into()))
+        Ok(())
     }
 
     fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, _rem_addr: SocketAddr) -> Result<()> {
@@ -263,6 +279,12 @@ impl PacketProcessor for ListenerInternal {
         }
 
         Ok(())
+    }
+}
+
+impl Drop for ListenerInternal {
+    fn drop(&mut self) {
+        debug!("Dropping ListenerInternal");
     }
 }
 
