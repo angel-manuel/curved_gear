@@ -117,14 +117,18 @@ impl ClientSocket {
     }
 
     pub fn recv(&mut self) -> Result<Vec<u8>> {
+        self.recv_timed(5000).and_then(|maybe_msg| maybe_msg.ok_or("Recv timeout".into()))
+    }
+
+    pub fn recv_timed(&mut self, timeout_ms: u64) -> Result<Option<Vec<u8>>> {
         let mut timer = Timer::new();
-        timer.set_timeout(5000);
+        timer.set_timeout(timeout_ms);
 
         loop {
             select!(
                 r:timer => {
                     debug!("ClientSocket \"{}\" connected to \"{}\" recv timeout", &self.my_extension, &self.server_extension);
-                    return Err("Couldn't recv".into());
+                    return Ok(None);
                 },
                 r:self.recv_rx => {
                     let (packet, rem_addr) = try!(self.recv_rx.recv().or(Err("Couldn't read recv_rx")));
@@ -140,7 +144,7 @@ impl ClientSocket {
                         self.last_recv_nonce = server_msg_packet.payload_box.nonce;
                         self.server_addr = rem_addr;
 
-                        return Ok(msg);
+                        return Ok(Some(msg));
                     }
                 }
             );

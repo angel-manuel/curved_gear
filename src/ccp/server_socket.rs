@@ -27,6 +27,10 @@ impl ServerSocket {
         self.core.recv()
     }
 
+    pub fn recv_timed(&mut self, timeout_ms: u64) -> Result<Option<Vec<u8>>> {
+        self.core.recv_timed(timeout_ms)
+    }
+
     pub fn send(&mut self, msg: &[u8]) -> Result<usize> {
         self.core.send(msg)
     }
@@ -50,18 +54,22 @@ struct ServerSocketCore {
 
 impl ServerSocketCore {
     pub fn recv(&mut self) -> Result<Vec<u8>> {
+        self.recv_timed(5000).and_then(|maybe_msg| maybe_msg.ok_or("Recv timeout".into()))
+    }
+
+    pub fn recv_timed(&mut self, timeout_ms: u64) -> Result<Option<Vec<u8>>> {
         let mut timer = Timer::new();
-        timer.set_timeout(5000);
+        timer.set_timeout(timeout_ms);
 
         select!(
             r:timer => {
                 let _ = timer.read();
-                return Err("Recv timeout".into());
+                return Ok(None);
             },
             r:self.recv_rx => {
-                let msg = self.recv_rx.recv().or(Err("Couldn't read from recv channel".into()));
+                let recv_res = self.recv_rx.recv().or(Err("Couldn't read from recv channel".into()));
                 debug!("\"{}\" reading msg from \"{}\"@{}", &self.my_extension, &self.client_extension, &self.rem_addr);
-                return msg;
+                return recv_res.map(|msg| Some(msg));
             }
         );
 
