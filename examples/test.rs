@@ -37,11 +37,17 @@ fn main() {
                 let mut sock = CCPClientSocket::connect_with_demultiplexor(demux,
                     client_id_c, remote_id_c).unwrap();
 
-                println!("Client {}: sending", client_id);
+                println!("Client \"{}\": sending", client_id);
                 sock.send("Hello world".as_bytes()).unwrap();
-                let buf = sock.recv().unwrap();
-                println!("Client {}: {}", client_id, String::from_utf8_lossy(&buf));
-                sock.send("".as_bytes()).unwrap();
+
+                let maybe_msg = sock.recv_timed(5000).unwrap();
+
+                if let Some(ref msg) = maybe_msg {
+                    println!("Client \"{}\": Recv'd \"{}\"", client_id, String::from_utf8_lossy(msg));
+                    sock.send("".as_bytes()).unwrap();
+                } else {
+                    println!("Client \"{}\" recv timedout", client_id);
+                }
             });
         }
 
@@ -50,10 +56,16 @@ fn main() {
 
             mioco::spawn(move || {
                 loop {
-                    let msg = sock.recv().unwrap();
-                    println!("Server {}: msg.len() = {}", i, msg.len());
-                    if msg.len() == 0 { break; }
-                    sock.send(&msg).unwrap();
+                    let maybe_msg = sock.recv_timed(5000).unwrap();
+
+                    if let Some(ref msg) = maybe_msg {
+                        println!("Server {}: msg.len() = {}", i, msg.len());
+                        if msg.len() == 0 { break; }
+                        sock.send(msg).unwrap();
+                    } else {
+                        println!("Server {} recv timedout", i);
+                        break;
+                    }
                 }
             });
         }
