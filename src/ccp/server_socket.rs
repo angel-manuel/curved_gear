@@ -32,6 +32,12 @@ impl ServerSocket {
     }
 }
 
+impl Drop for ServerSocket {
+    fn drop(&mut self) {
+        debug!("Dropping ServerSocket \"{}\" listening to \"{}\"", &self.core.my_extension, &self.core.client_extension);
+    }
+}
+
 struct ServerSocketCore {
     recv_rx: Receiver<Vec<u8>>,
     rem_addr: SocketAddr,
@@ -53,7 +59,9 @@ impl ServerSocketCore {
                 return Err("Recv timeout".into());
             },
             r:self.recv_rx => {
-                return self.recv_rx.recv().or(Err("Couldn't read from recv channel".into()));
+                let msg = self.recv_rx.recv().or(Err("Couldn't read from recv channel".into()));
+                debug!("\"{}\" reading msg from \"{}\"@{}", &self.my_extension, &self.client_extension, &self.rem_addr);
+                return msg;
             }
         );
 
@@ -79,18 +87,13 @@ impl ServerSocketCore {
     }
 }
 
-impl Drop for ServerSocketCore {
-    fn drop(&mut self) {
-        debug!("Dropping ServerSocketCore");
-    }
-}
-
 struct ListenerInternal {
     my_extension: Extension,
     my_long_term_sk: server_long_term::SecretKey,
     minute_key: crypto_secretbox::Key,
     last_minute_key: crypto_secretbox::Key,
     conns: HashMap<(Extension, client_short_term::PublicKey), ServerConnection>,
+    accept: bool,
     accept_tx: Sender<ServerSocketCore>,
     sock: UdpSocket,
 }
@@ -111,6 +114,7 @@ impl Listener {
             minute_key: crypto_secretbox::gen_key(),
             last_minute_key: crypto_secretbox::gen_key(),
             conns: HashMap::new(),
+            accept: true,
             accept_tx: accept_tx,
             sock: sock,
         }));
@@ -150,12 +154,12 @@ impl Listener {
     }
 
     pub fn accept_sock(&mut self) -> Result<ServerSocket> {
-        let server_socket_core = try!(self.accept_rx.recv().or(Err("Couldnt read accept channel")));
+        let core = try!(self.accept_rx.recv().or(Err("Couldnt read accept channel")));
 
-        debug!("Accepting ServerSocket");
+        info!("\"{}\" accepting connection \"{}\"@{}", &core.my_extension, &core.client_extension, &core.rem_addr);
 
         Ok(ServerSocket {
-            core: server_socket_core,
+            core: core,
             _listener_internal: self.internal.clone(),
         })
     }
@@ -169,6 +173,10 @@ impl Drop for Listener {
 
 impl ListenerInternal {
     fn process_hello(&mut self, hello_packet: HelloPacket, rem_addr: SocketAddr) -> Result<()> {
+        if !self.accept {
+            return Ok(());
+        }
+
         let client_short_term_pk = hello_packet.client_short_term_pk;
         let conn_key = (hello_packet.client_extension.clone(), client_short_term_pk.clone());
 
@@ -199,6 +207,10 @@ impl ListenerInternal {
     }
 
     fn process_initiate(&mut self, initiate_packet: InitiatePacket, rem_addr: SocketAddr) -> Result<()> {
+        if !self.accept {
+            return Ok(());
+        }
+
         let conn_key = (initiate_packet.client_extension.clone(), initiate_packet.client_short_term_pk.clone());
 
         if self.conns.contains_key(&conn_key) {
@@ -232,7 +244,7 @@ impl ListenerInternal {
         };
 
         self.conns.insert(conn_key, new_conn);
-        info!("\"{}\" pre-accepting connection \"{}\"@{}", &self.my_extension, &initiate_packet.client_extension, &rem_addr);
+        // info!("\"{}\" pre-accepting connection \"{}\"@{}", &self.my_extension, &initiate_packet.client_extension, &rem_addr);
 
         let new_sock = ServerSocketCore {
             recv_rx: recv_rx,
@@ -244,12 +256,18 @@ impl ListenerInternal {
             next_send_nonce: Nonce8::new_low(),
         };
 
-        try!(self.accept_tx.send(new_sock).or(Err("Couldnt read accept channel")));
+        let res = self.accept_tx.send(new_sock);
+
+        if res.is_err() {
+            self.accept = false;
+        }
 
         Ok(())
     }
 
-    fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, _rem_addr: SocketAddr) -> Result<()> {
+    fn process_client_msg(&mut self, client_msg_packet: ClientMessagePacket, rem_addr: SocketAddr) -> Result<()> {
+        debug!("\"{}\" recv msg from \"{}\"@{}", &self.my_extension, &client_msg_packet.client_extension, &rem_addr);
+
         let conn_key = (client_msg_packet.client_extension.clone(),
                         client_msg_packet.client_short_term_pk.clone());
 
@@ -274,7 +292,7 @@ impl PacketProcessor for ListenerInternal {
                 try!(self.process_hello(hello_packet, rem_addr));
             },
             _ => {
-                debug!("Unvalid packet type");
+                debug!("Invalid packet type");
             }
         }
 

@@ -123,7 +123,7 @@ impl ClientSocket {
         loop {
             select!(
                 r:timer => {
-                    debug!("Client recv timeout");
+                    debug!("ClientSocket \"{}\" connected to \"{}\" recv timeout", &self.my_extension, &self.server_extension);
                     return Err("Couldn't recv".into());
                 },
                 r:self.recv_rx => {
@@ -170,7 +170,7 @@ impl ClientSocket {
 
 impl Drop for ClientSocket {
     fn drop(&mut self) {
-        debug!("Dropping ClientSocket");
+        debug!("Dropping ClientSocket \"{}\" connected to \"{}\"", &self.my_extension, &self.server_extension);
         let mut demux = self.demultiplexor.lock().expect("Couldn't lock demultiplexor");
         demux.remove_listener(&self.my_extension);
     }
